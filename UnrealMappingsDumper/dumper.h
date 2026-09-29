@@ -4,5 +4,5 @@
 
 namespace Dumper
 {
-	void Run(ECompressionMethod CompressionMethod);
+	bool Run(ECompressionMethod CompressionMethod, const std::filesystem::path& OutputPath);
 };

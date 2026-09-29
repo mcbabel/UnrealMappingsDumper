@@ -9,71 +9,63 @@
 * that need to be overriden or handled differently.
 */
 
+struct OffsetFinder
+{
+	static bool FindGObjects(const std::vector<std::shared_ptr<IScanObject>>& Scans);
+
+	static bool FindOffsets();
+
+	static void LogOffsets();
+};
+
 struct IUnrealVersion
 {
-private:
-	static bool TryDynamicOffsets();
-
 public:
 
 	template <typename Version>
 	static bool InitTypes()
 	{
-		uintptr_t GObjectsAddy = 0;
+		ApplyDefaults<Version>();
 
-		for (auto Scan : Version::GetGObjectsPatterns())
+		if (!OffsetFinder::FindGObjects(Version::GetGObjectsPatterns()))
 		{
-			GObjectsAddy = Scan->TryFind();
-
-			if (GObjectsAddy)
-				break;
-		}
-
-		if (!GObjectsAddy)
-		{
-			UE_LOG("Could not find the address for GObjects. Try overriding it or adding the correct sig for it.");
+			UE_LOG("Could not find GObjects. Try overriding it or adding the correct sig for it.");
 			return false;
 		}
 
-		ObjObjects::SetInstance(GObjectsAddy);
-
-		uintptr_t FNameStringAddy = 0;
-
-		for (auto Scan : Version::GetFNameStringPatterns())
+		if (!Names::Init(Version::GetFNameStringPatterns(), Version::GetNamePoolPatterns()))
 		{
-			FNameStringAddy = Scan->TryFind();
-
-			if (FNameStringAddy)
-				break;
-		}
-
-		if (!FNameStringAddy)
-		{
-			UE_LOG("Could not find the address for FNameToString. Try overriding it or adding the correct sig for it.");
+			UE_LOG("Could not find FName::ToString or the name pool. Try overriding it or adding the correct sig for it.");
 			return false;
 		}
 
-		FNameToString = (_FNameToString)FNameStringAddy;
+		if (!OffsetFinder::FindOffsets())
+			return false;
 
+		OffsetFinder::LogOffsets();
+
+		return true;
+	}
+
+private:
+
+	template <typename Version>
+	static void ApplyDefaults()
+	{
 		using UObjectImpl = Version::Offsets::UObject;
 		using UStructImpl = Version::Offsets::UStruct;
 
 		UObject::NameOffset = UObjectImpl::NameOffset;
+		UObject::ClassOffset = UObjectImpl::ClassOffset;
+		UObject::OuterOffset = UObjectImpl::OuterOffset;
+
+		UStruct::SuperOffset = UStructImpl::SuperOffset;
+		UStruct::ChildPropertiesOffset = UStructImpl::ChildPropertiesOffset;
+
 		FName::IsOptimized = Version::HasOptimizedFName;
 		FProperty::FPropertySize = Version::FPropertySize;
 
-		if (!TryDynamicOffsets())
-		{
-			UE_LOG("Could not grab dynamic offsets. Just gonna use the hardcoded ones.");
-
-			UObject::ClassOffset = UObjectImpl::ClassOffset;
-			UObject::OuterOffset = UObjectImpl::OuterOffset;
-
-			UStruct::SuperOffset = UStructImpl::SuperOffset;
-			UStruct::ChildPropertiesOffset = UStructImpl::ChildPropertiesOffset;
-		}
-
-		return true;
+		FProperty::ArrayDimOffset = Version::HasOptimizedFName ? 0x30 : 0x38;
 	}
 };
 
@@ -113,20 +105,38 @@ struct UnrealVersionBase : IUnrealVersion
 			std::make_shared<PatternScanObject>("E8 ? ? ? ? BD 01 00 00 00 41 39 6E ? 0F 8E", 1, true),// 4.25+ Backup
 			std::make_shared<StringRefScanObject<std::wstring>>(
 				L"%s %s SetTimer passed a negative or zero time. The associated timer may fail to be created/fire! If using InitialStartDelayVariance, be sure it is smaller than (Time + InitialStartDelay).",
-				true, 1, true, 0xE8)
+				true, 1, true, 0xE8),
+			std::make_shared<StringRefCallScanObject>(L"ForwardShadingQuality_", std::vector<std::string>
+			{
+				"48 8D ? ? 48 8D ? ? E8",
+				"48 8D ? ? ? 48 8D ? ? E8",
+				"48 8D ? ? 49 8B ? E8",
+				"48 8D ? ? ? 49 8B ? E8",
+				"48 8D ? ? 48 8B ? E8",
+				"48 8D ? ? ? 48 8B ? E8",
+			})
 		};
 	}
 
+	static std::vector<std::shared_ptr<IScanObject>> GetNamePoolPatterns()
+	{
+		return
+		{
+			std::make_shared<PatternScanObject>("48 8D 0D ? ? ? ? E8 ? ? ? ? C6 05 ? ? ? ? 01", 3, true),
+			std::make_shared<PatternScanObject>("48 8D 05 ? ? ? ? EB ? 48 8D 0D ? ? ? ? E8 ? ? ? ? C6 05", 3, true),
+		};
+	}
 
 	static std::vector<std::shared_ptr<IScanObject>> GetGObjectsPatterns()
 	{
 		return
 		{
+			std::make_shared<PatternScanObject>("48 8B 05 ? ? ? ? 48 8B 0C C8 48 8D 04 D1", 3, true),
+			std::make_shared<PatternScanObject>("48 8B 05 ? ? ? ? 48 8B 0C C8", 3, true),
 			std::make_shared<PatternScanObject>("48 89 05 ? ? ? ? E8 ? ? ? ? ? ? ? 0F 84", 3, true),
 			std::make_shared<PatternScanObject>("48 8B 05 ? ? ? ? 48 8B 0C 07 48 85 C9 74 20", 3, true),
 			std::make_shared<PatternScanObject>("48 8B 05 ? ? ? ? 48 8B 0C", 3, true),
-			std::make_shared<PatternScanObject>("48 03 ? ? ? ? ? ? ? ? ? ? 48 8B 10 48 85 D2 74 07", 3, true)
-
+			std::make_shared<PatternScanObject>("48 03 ? ? ? ? ? ? ? ? ? ? 48 8B 10 48 85 D2 74 07", 3, true),
 		};
 	}
 };
@@ -142,11 +152,4 @@ struct Version_OptimizedFName : UnrealVersionBase
 
 struct Version_FortniteLatest : Version_OptimizedFName
 {
-	static std::vector<std::shared_ptr<IScanObject>> GetGObjectsPatterns()
-	{
-		return
-		{
-			std::make_shared<PatternScanObject>("48 8B 05 ? ? ? ? 48 8B 0C C8", 3, true)
-		};
-	}
 };

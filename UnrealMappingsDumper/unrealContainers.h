@@ -23,9 +23,14 @@ public:
 		ArrayMax = 0;
 	}
 
-	FORCEINLINE int Num()
+	FORCEINLINE int Num() const
 	{
 		return ArrayNum;
+	}
+
+	FORCEINLINE int Max() const
+	{
+		return ArrayMax;
 	}
 
 	FORCEINLINE T& operator[](int i)
@@ -33,9 +38,16 @@ public:
 		return Buffer[i];
 	};
 
-	FORCEINLINE T* Data()
+	FORCEINLINE T* Data() const
 	{
 		return Buffer;
+	}
+
+protected:
+
+	FORCEINLINE void ResetNumKeepAllocation()
+	{
+		ArrayNum = 0;
 	}
 };
 
@@ -100,8 +112,18 @@ class FString : public TArray<wchar_t>
 {
 public:
 
-	FORCEINLINE std::wstring_view AsString()
+	using TArray<wchar_t>::ResetNumKeepAllocation;
+
+	std::wstring_view AsString() const
 	{
-		return Data();
+		if (!Data() || Num() <= 0)
+			return {};
+
+		size_t Length = Num();
+
+		if (Data()[Length - 1] == L'\0')
+			Length--;
+
+		return std::wstring_view(Data(), Length);
 	}
 };

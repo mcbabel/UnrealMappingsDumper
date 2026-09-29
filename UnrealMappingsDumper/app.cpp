@@ -3,54 +3,12 @@
 #include "app.h"
 #include "unrealVersion.h"
 
-struct GameInstance
-{
-	std::filesystem::path GamePath;
-	float Version = 0;
-};
-
-static std::optional<GameInstance> TryGetGameInfo()
-{
-	wchar_t GameFilePath[MAX_PATH];
-	GetModuleFileName(0, GameFilePath, MAX_PATH);
-
-	DWORD verHandle = 0;
-	DWORD verSize = GetFileVersionInfoSize(GameFilePath, &verHandle);
-
-	if (!verSize)
-		return std::nullopt;
-
-	std::string VerData(verSize, '\0');
-	uint32_t size = 0;
-	VS_FIXEDFILEINFO* VersionInfo = nullptr;
-
-	if (!GetFileVersionInfo(GameFilePath, verHandle, verSize, VerData.data()) ||
-		!VerQueryValue(VerData.data(), L"\\", (VOID FAR * FAR*) & VersionInfo, &size) ||
-		!size ||
-		VersionInfo->dwSignature != 0xfeef04bd)
-	{
-		return std::nullopt;
-	}
-
-	auto VersionStr = std::format("{:d}.{:d}.{:d}.{:d}",
-		(VersionInfo->dwFileVersionMS >> 16) & 0xffff,
-		(VersionInfo->dwFileVersionMS >> 0) & 0xffff,
-		(VersionInfo->dwFileVersionLS >> 16) & 0xffff,
-		(VersionInfo->dwFileVersionLS >> 0) & 0xffff);
-
-	GameInstance Ret;
-	Ret.GamePath = std::filesystem::path(GameFilePath);
-	Ret.Version = std::stof(VersionStr);
-
-	return Ret;
-}
-
-static bool InitEngine(GameInstance& Game)
+static bool InitEngine(const App::FGameInfo& Game)
 {
 	// if an engine version has a different type or offset, set it here
 
-	if (Game.GamePath.filename() == "FortniteClient-Win64-Shipping.exe"
-		and Game.Version >= 5.0)
+	if (Game.ExecutableName == "FortniteClient-Win64-Shipping.exe"
+		and Game.MajorMinor >= 5.0)
 	{
 		return IUnrealVersion::InitTypes<Version_FortniteLatest>();
 	}
@@ -58,17 +16,29 @@ static bool InitEngine(GameInstance& Game)
 	return IUnrealVersion::InitTypes<UnrealVersionBase>();
 }
 
-bool App::Init()
+bool App::Init(const FGameInfo& Game)
 {
-	auto GameOpt = TryGetGameInfo();
+	UE_LOG("Game executable: %s", Game.ExecutableName.c_str());
+	UE_LOG("Executable version: %s", Game.FileVersion.empty() ? "unknown" : Game.FileVersion.c_str());
 
-	if (!GameOpt.has_value())
-		return false;
+	std::string LowerName = Game.ExecutableName;
 
-	auto& Game = GameOpt.value();
+	for (auto& C : LowerName)
+		C = static_cast<char>(tolower(static_cast<unsigned char>(C)));
 
-	UE_LOG("Detected Unreal Engine version %f", Game.Version);
-	UE_LOG("Detected game %s", Game.GamePath.filename().string().c_str());
+	bool bLooksLikeUnreal = false;
+
+	for (auto Marker : { "-win64-", "-wingdk-", "-linux-", "-linuxarm64-" })
+	{
+		if (LowerName.find(Marker) != std::string::npos)
+			bLooksLikeUnreal = true;
+	}
+
+	if (!bLooksLikeUnreal)
+	{
+		UE_LOG("Note: this doesn't look like an Unreal Engine game executable (<Project>-Win64-Shipping.exe or <Project>-Linux-Shipping).");
+		UE_LOG("      Make sure this is the actual game process and not a launcher/bootstrap executable.");
+	}
 
 	return InitEngine(Game);
 }

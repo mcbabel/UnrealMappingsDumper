@@ -1,11 +1,5 @@
 #pragma once
 
-#include <urlmon.h>
-#pragma comment(lib,"urlmon.lib")
-
-constexpr const char* OodlePath = "Oodle.dll";
-constexpr const char* OodleDownload = "https://cdn.discordapp.com/attachments/817251677086285848/992648087371792404/oo2core_9_win64.dll";
-
 enum class OodleFormat
 {
 	Invalid = -1,
@@ -33,63 +27,109 @@ enum class OodleCompressionLevel : uint32_t
 	Optimal5
 };
 
-typedef uint64_t(*_OodleCompressFunc)(
+typedef int64_t(*_OodleCompressFunc)(
 	OodleFormat format,
-	void* buffer,
+	const void* buffer,
 	int64_t bufferSize,
 	void* outputBuffer,
 	OodleCompressionLevel level,
-	uint64_t a6,
-	uint64_t a7,
-	uint64_t a8);
-
-inline _OodleCompressFunc OodleLZ_Compress;
+	void* options,
+	void* dictionaryBase,
+	void* lrm,
+	void* scratchMem,
+	int64_t scratchSize);
 
 class Oodle
 {
-	Oodle()
+	static inline _OodleCompressFunc OodleLZ_Compress = nullptr;
+
+	static constexpr const wchar_t* DllNames[] =
 	{
-		if (!std::filesystem::exists(OodlePath))
+		L"oo2core_9_win64.dll",
+		L"oo2core_8_win64.dll",
+		L"oo2core_7_win64.dll",
+		L"oo2core_6_win64.dll",
+		L"oo2core_5_win64.dll",
+		L"Oodle.dll",
+	};
+
+	static std::filesystem::path GetModuleDirectory(HMODULE Module)
+	{
+		wchar_t Path[MAX_PATH];
+		GetModuleFileNameW(Module, Path, MAX_PATH);
+		return std::filesystem::path(Path).parent_path();
+	}
+
+	static HMODULE FindOodle()
+	{
+		for (auto Name : DllNames)
 		{
-			URLDownloadToFileA(NULL, OodleDownload, OodlePath, 0, NULL);
+			if (auto Module = GetModuleHandleW(Name))
+				return Module;
 		}
 
-		auto OodleHandle = LoadLibraryA(OodlePath);
-		auto OodleCompressAddy = GetProcAddress(OodleHandle, "OodleLZ_Compress");
-		OodleLZ_Compress = (_OodleCompressFunc)OodleCompressAddy;
+		HMODULE Self = nullptr;
+		GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCWSTR>(&FindOodle), &Self);
+
+		for (auto& Directory : { GetModuleDirectory(Self), GetModuleDirectory(nullptr) })
+		{
+			for (auto Name : DllNames)
+			{
+				auto Path = Directory / Name;
+
+				if (std::filesystem::exists(Path))
+				{
+					if (auto Module = LoadLibraryW(Path.c_str()))
+						return Module;
+				}
+			}
+		}
+
+		return nullptr;
 	}
 
-	static void EnsureInitialized()
-	{
-		static Oodle _;
-	}
-
-	static __forceinline uint32_t GetCompressionBound(uint32_t uncompressedSize)
+	static __forceinline int64_t GetCompressionBound(int64_t uncompressedSize)
 	{
 		return uncompressedSize + 274 * ((uncompressedSize + 0x3FFFF) / 0x40000);
 	}
 
 public:
-	static std::vector<uint8_t> Compress(std::stringstream& uncompressedStream, OodleFormat format = OodleFormat::Kraken, OodleCompressionLevel level = OodleCompressionLevel::Optimal5)
+
+	static bool IsAvailable()
 	{
-		auto streamData = uncompressedStream.str();
-		return Compress((void*)streamData.c_str(), streamData.size(), format, level);
+		static bool bInitialized = false;
+
+		if (!bInitialized)
+		{
+			bInitialized = true;
+
+			if (auto Module = FindOodle())
+				OodleLZ_Compress = reinterpret_cast<_OodleCompressFunc>(GetProcAddress(Module, "OodleLZ_Compress"));
+		}
+
+		return OodleLZ_Compress != nullptr;
 	}
 
-	static std::vector<uint8_t> Compress(void* uncompressedBuf, int64_t bufSize, OodleFormat format = OodleFormat::Kraken, OodleCompressionLevel level = OodleCompressionLevel::Optimal5)
+	static std::vector<uint8_t> Compress(const std::string& uncompressed, OodleFormat format = OodleFormat::Kraken, OodleCompressionLevel level = OodleCompressionLevel::Optimal5)
 	{
-		EnsureInitialized();
+		if (!IsAvailable() || uncompressed.empty())
+			return {};
 
-		auto compressedBuf = std::make_unique<uint8_t[]>(GetCompressionBound(bufSize));
+		std::vector<uint8_t> compressed(GetCompressionBound(uncompressed.size()));
 
 		auto compressedSize = OodleLZ_Compress(
 			format,
-			uncompressedBuf,
-			bufSize,
-			compressedBuf.get(),
+			uncompressed.data(),
+			uncompressed.size(),
+			compressed.data(),
 			level,
-			0, 0, 0);
+			nullptr, nullptr, nullptr, nullptr, 0);
 
-		return std::vector<uint8_t>(compressedBuf.get(), compressedBuf.get() + compressedSize);
+		if (compressedSize <= 0 || compressedSize > static_cast<int64_t>(compressed.size()))
+			return {};
+
+		compressed.resize(compressedSize);
+		return compressed;
 	}
 };

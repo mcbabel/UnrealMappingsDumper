@@ -1,8 +1,24 @@
 #pragma once
 
+namespace Scanner
+{
+	std::vector<uintptr_t> FindPattern(std::string_view Signature, size_t MaxResults = SIZE_MAX);
+
+	uintptr_t FindPatternInRange(std::string_view Signature, uintptr_t Start, size_t Range);
+
+	std::vector<uintptr_t> FindStringRefs(std::wstring_view String);
+	std::vector<uintptr_t> FindStringRefs(std::string_view String);
+
+	uintptr_t ResolveRelative(uintptr_t Instruction, int DisplacementOffset, int InstructionLength);
+}
+
 struct IScanObject
 {
-	virtual uintptr_t TryFind() = 0;
+	virtual ~IScanObject() = default;
+
+	virtual std::vector<uintptr_t> FindAll() = 0;
+
+	virtual std::string Describe() const = 0;
 };
 
 struct PatternScanObject : public IScanObject
@@ -12,11 +28,11 @@ struct PatternScanObject : public IScanObject
 		int relativeAddressOffset = 0,
 		bool relative = true,
 		int resultOffset = 0)
-		: 
-		Sig(sig), 
-		ResultOffset(resultOffset), 
-		bRelative(relative), 
-		RelativeAddressOffset(relativeAddressOffset)
+		:
+		Sig(sig),
+		bRelative(relative),
+		RelativeAddressOffset(relativeAddressOffset),
+		ResultOffset(resultOffset)
 	{
 	}
 
@@ -25,7 +41,8 @@ struct PatternScanObject : public IScanObject
 	int RelativeAddressOffset;
 	int ResultOffset;
 
-	uintptr_t TryFind() override;
+	std::vector<uintptr_t> FindAll() override;
+	std::string Describe() const override;
 };
 
 template <typename StrType = std::wstring>
@@ -55,5 +72,21 @@ struct StringRefScanObject : public IScanObject
 	int Offset;
 	bool bScanBackwards;
 
-	uintptr_t TryFind() override;
+	std::vector<uintptr_t> FindAll() override;
+	std::string Describe() const override;
+};
+
+struct StringRefCallScanObject : public IScanObject
+{
+	StringRefCallScanObject(std::wstring stringRef, std::vector<std::string> callSigs, size_t range = 0x50)
+		: StringRef(std::move(stringRef)), CallSigs(std::move(callSigs)), Range(range)
+	{
+	}
+
+	std::wstring StringRef;
+	std::vector<std::string> CallSigs;
+	size_t Range;
+
+	std::vector<uintptr_t> FindAll() override;
+	std::string Describe() const override;
 };

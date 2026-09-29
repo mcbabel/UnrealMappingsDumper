@@ -2,360 +2,472 @@
 
 #include "dumper.h"
 #include "writer.h"
+#ifdef _WIN32
 #include "oodle.h"
+#endif
+#include "app.h"
 
-static EPropertyType GetPropertyType(FProperty* Prop)
+namespace
 {
-	switch (Prop->GetClass()->GetId())
-	{
-	case CASTCLASS_FObjectProperty:
-	case CASTCLASS_FClassProperty:
-	case CASTCLASS_FObjectPtrProperty:
-	case CASTCLASS_FClassPtrProperty:
-	{
-		return EPropertyType::ObjectProperty;
-	}
-	case CASTCLASS_FStructProperty:
-	{
-		return EPropertyType::StructProperty;
-	}
-	case CASTCLASS_FInt8Property:
-	{
-		return EPropertyType::Int8Property;
-	}
-	case CASTCLASS_FInt16Property:
-	{
-		return EPropertyType::Int16Property;
-	}
-	case CASTCLASS_FIntProperty:
-	{
-		return EPropertyType::IntProperty;
-	}
-	case CASTCLASS_FInt64Property:
-	{
-		return EPropertyType::Int64Property;
-	}
-	case CASTCLASS_FUInt16Property:
-	{
-		return EPropertyType::UInt16Property;
-	}
-	case CASTCLASS_FUInt32Property:
-	{
-		return EPropertyType::UInt32Property;
-	}
-	case CASTCLASS_FUInt64Property:
-	{
-		return EPropertyType::UInt64Property;
-	}
-	case CASTCLASS_FArrayProperty:
-	{
-		return EPropertyType::ArrayProperty;
-	}
-	case CASTCLASS_FFloatProperty:
-	{
-		return EPropertyType::FloatProperty;
-	}
-	case CASTCLASS_FDoubleProperty:
-	{
-		return EPropertyType::DoubleProperty;
-	}
-	case CASTCLASS_FBoolProperty:
-	{
-		return EPropertyType::BoolProperty;
-	}
-	case CASTCLASS_FStrProperty:
-	{
-		return EPropertyType::StrProperty;
-	}
-	case CASTCLASS_FNameProperty:
-	{
-		return EPropertyType::NameProperty;
-	}
-	case CASTCLASS_FTextProperty:
-	{
-		return EPropertyType::TextProperty;
-	}
-	case CASTCLASS_FEnumProperty:
-	{
-		return EPropertyType::EnumProperty;
-	}
-	case CASTCLASS_FInterfaceProperty:
-	{
-		return EPropertyType::InterfaceProperty;
-	}
-	case CASTCLASS_FMapProperty:
-	{
-		return EPropertyType::MapProperty;
-	}
-	case CASTCLASS_FByteProperty:
-	{
-		FByteProperty* ByteProp = static_cast<FByteProperty*>(Prop);
+	constexpr EUsmapVersion UsmapVersion = EUsmapVersion::ExplicitEnumValues;
 
-		if (ByteProp->GetEnum())
-			return EPropertyType::EnumAsByteProperty;
+	constexpr int32_t InvalidNameIndex = -1;
 
-		return EPropertyType::ByteProperty;
-	}
-	case CASTCLASS_FMulticastDelegateProperty:
-	case CASTCLASS_FMulticastInlineDelegateProperty:
-	case CASTCLASS_FMulticastSparseDelegateProperty:
+	constexpr int MaxPropertiesPerStruct = 0x4000;
+
+	EPropertyType TypeFromClassName(const std::string& Name)
 	{
-		return EPropertyType::MulticastDelegateProperty;
+		static const std::unordered_map<std::string, EPropertyType> Types =
+		{
+			{ "ByteProperty", EPropertyType::ByteProperty },
+			{ "BoolProperty", EPropertyType::BoolProperty },
+			{ "IntProperty", EPropertyType::IntProperty },
+			{ "Int8Property", EPropertyType::Int8Property },
+			{ "Int16Property", EPropertyType::Int16Property },
+			{ "Int64Property", EPropertyType::Int64Property },
+			{ "UInt16Property", EPropertyType::UInt16Property },
+			{ "UInt32Property", EPropertyType::UInt32Property },
+			{ "UInt64Property", EPropertyType::UInt64Property },
+			{ "FloatProperty", EPropertyType::FloatProperty },
+			{ "DoubleProperty", EPropertyType::DoubleProperty },
+			{ "LargeWorldCoordinatesRealProperty", EPropertyType::DoubleProperty },
+			{ "NameProperty", EPropertyType::NameProperty },
+			{ "StrProperty", EPropertyType::StrProperty },
+			{ "TextProperty", EPropertyType::TextProperty },
+			{ "ObjectProperty", EPropertyType::ObjectProperty },
+			{ "ClassProperty", EPropertyType::ObjectProperty },
+			{ "ObjectPtrProperty", EPropertyType::ObjectProperty },
+			{ "ClassPtrProperty", EPropertyType::ObjectProperty },
+			{ "WeakObjectProperty", EPropertyType::WeakObjectProperty },
+			{ "LazyObjectProperty", EPropertyType::LazyObjectProperty },
+			{ "SoftObjectProperty", EPropertyType::SoftObjectProperty },
+			{ "SoftClassProperty", EPropertyType::SoftObjectProperty },
+			{ "AssetObjectProperty", EPropertyType::AssetObjectProperty },
+			{ "AssetClassProperty", EPropertyType::AssetObjectProperty },
+			{ "InterfaceProperty", EPropertyType::InterfaceProperty },
+			{ "StructProperty", EPropertyType::StructProperty },
+			{ "ArrayProperty", EPropertyType::ArrayProperty },
+			{ "MapProperty", EPropertyType::MapProperty },
+			{ "SetProperty", EPropertyType::SetProperty },
+			{ "EnumProperty", EPropertyType::EnumProperty },
+			{ "DelegateProperty", EPropertyType::DelegateProperty },
+			{ "MulticastDelegateProperty", EPropertyType::MulticastDelegateProperty },
+			{ "MulticastInlineDelegateProperty", EPropertyType::MulticastDelegateProperty },
+			{ "MulticastSparseDelegateProperty", EPropertyType::MulticastDelegateProperty },
+			{ "FieldPathProperty", EPropertyType::FieldPathProperty },
+			{ "OptionalProperty", EPropertyType::OptionalProperty },
+			{ "Utf8StrProperty", EPropertyType::Utf8StrProperty },
+			{ "AnsiStrProperty", EPropertyType::AnsiStrProperty },
+		};
+
+		auto It = Types.find(Name);
+		return It != Types.end() ? It->second : EPropertyType::Unknown;
 	}
-	case CASTCLASS_FDelegateProperty:
+
+	EPropertyType TypeFromCastFlags(uint64_t Flags)
 	{
-		return EPropertyType::DelegateProperty;
-	}
-	case CASTCLASS_FSoftObjectProperty:
-	case CASTCLASS_FSoftClassProperty:
-	{
-		return EPropertyType::SoftObjectProperty;
-	}
-	case CASTCLASS_FWeakObjectProperty:
-	{
-		return EPropertyType::WeakObjectProperty;
-	}
-	case CASTCLASS_FLazyObjectProperty:
-	{
-		return EPropertyType::LazyObjectProperty;
-	}
-	case CASTCLASS_FSetProperty:
-	{
-		return EPropertyType::SetProperty;
-	}
-	case CASTCLASS_FFieldPathProperty:
-	{
-		return EPropertyType::FieldPathProperty;
-	}
-	default:
-	{
+		static const std::pair<uint64_t, EPropertyType> Types[] =
+		{
+			{ CASTCLASS_FObjectProperty | CASTCLASS_FClassProperty | CASTCLASS_FObjectPtrProperty | CASTCLASS_FClassPtrProperty, EPropertyType::ObjectProperty },
+			{ CASTCLASS_FStructProperty, EPropertyType::StructProperty },
+			{ CASTCLASS_FByteProperty, EPropertyType::ByteProperty },
+			{ CASTCLASS_FInt8Property, EPropertyType::Int8Property },
+			{ CASTCLASS_FInt16Property, EPropertyType::Int16Property },
+			{ CASTCLASS_FIntProperty, EPropertyType::IntProperty },
+			{ CASTCLASS_FInt64Property, EPropertyType::Int64Property },
+			{ CASTCLASS_FUInt16Property, EPropertyType::UInt16Property },
+			{ CASTCLASS_FUInt32Property, EPropertyType::UInt32Property },
+			{ CASTCLASS_FUInt64Property, EPropertyType::UInt64Property },
+			{ CASTCLASS_FArrayProperty, EPropertyType::ArrayProperty },
+			{ CASTCLASS_FFloatProperty, EPropertyType::FloatProperty },
+			{ CASTCLASS_FDoubleProperty | CASTCLASS_FLargeWorldCoordinatesRealProperty, EPropertyType::DoubleProperty },
+			{ CASTCLASS_FBoolProperty, EPropertyType::BoolProperty },
+			{ CASTCLASS_FStrProperty, EPropertyType::StrProperty },
+			{ CASTCLASS_FNameProperty, EPropertyType::NameProperty },
+			{ CASTCLASS_FTextProperty, EPropertyType::TextProperty },
+			{ CASTCLASS_FEnumProperty, EPropertyType::EnumProperty },
+			{ CASTCLASS_FInterfaceProperty, EPropertyType::InterfaceProperty },
+			{ CASTCLASS_FMapProperty, EPropertyType::MapProperty },
+			{ CASTCLASS_FMulticastDelegateProperty | CASTCLASS_FMulticastInlineDelegateProperty | CASTCLASS_FMulticastSparseDelegateProperty, EPropertyType::MulticastDelegateProperty },
+			{ CASTCLASS_FDelegateProperty, EPropertyType::DelegateProperty },
+			{ CASTCLASS_FSoftObjectProperty | CASTCLASS_FSoftClassProperty, EPropertyType::SoftObjectProperty },
+			{ CASTCLASS_FWeakObjectProperty, EPropertyType::WeakObjectProperty },
+			{ CASTCLASS_FLazyObjectProperty, EPropertyType::LazyObjectProperty },
+			{ CASTCLASS_FSetProperty, EPropertyType::SetProperty },
+			{ CASTCLASS_FFieldPathProperty, EPropertyType::FieldPathProperty },
+		};
+
+		for (auto& [Mask, Type] : Types)
+		{
+			if (Flags & Mask)
+				return Type;
+		}
+
 		return EPropertyType::Unknown;
 	}
-	}
-}
 
-struct FPropertyData
-{
-	FProperty* Prop;
-	uint16_t Index;
-	uint8_t ArrayDim;
-	FName Name;
-	EPropertyType PropertyType;
-
-	FPropertyData(FProperty* P, int Idx) :
-		Prop(P),
-		Index(Idx),
-		ArrayDim(P->GetArrayDim()),
-		Name(P->GetFName()),
-		PropertyType(GetPropertyType(P))
+	EPropertyType GetPropertyType(FProperty Prop)
 	{
+		static std::unordered_map<uintptr_t, EPropertyType> Cache;
+
+		auto Class = Prop.GetClass();
+
+		if (!Class)
+			return EPropertyType::Unknown;
+
+		EPropertyType Type;
+
+		if (auto It = Cache.find(Class.GetAddress()); It != Cache.end())
+		{
+			Type = It->second;
+		}
+		else
+		{
+			auto ClassName = Class.GetName();
+
+			Type = TypeFromClassName(ClassName);
+
+			if (Type == EPropertyType::Unknown)
+			{
+				Type = TypeFromCastFlags(Class.GetCastFlags());
+
+				UE_LOG("Property class \"%s\" isn't known, %s.", ClassName.c_str(),
+					Type == EPropertyType::Unknown ? "writing it as unknown" : "using the type it inherits from");
+			}
+
+			Cache[Class.GetAddress()] = Type;
+		}
+
+		if (Type == EPropertyType::ByteProperty && Prop.Cast<FByteProperty>().GetEnum())
+			return EPropertyType::EnumAsByteProperty;
+
+		return Type;
 	}
-};
 
-void Dumper::Run(ECompressionMethod CompressionMethod)
-{
-	StreamWriter Buffer;
-	phmap::parallel_flat_hash_map<FName, int> NameMap;
-
-	std::vector<UEnum*> Enums;
-	std::vector<UStruct*> Structs; // TODO: a better way than making this completely dynamic
-
-	std::function<void(class FProperty*&, EPropertyType)> WritePropertyWrapper{}; // hacky.. i know
-
-	auto WriteProperty = [&](FProperty*& Prop, EPropertyType Type)
+	struct FNameTable
 	{
-		if (Type == EPropertyType::EnumAsByteProperty)
-			Buffer.Write(EPropertyType::EnumProperty);
-		else Buffer.Write(Type);
+		phmap::parallel_flat_hash_map<FName, int32_t> Indices;
+		std::vector<FName> Names;
+
+		void Add(FName Name)
+		{
+			if (Indices.try_emplace(Name, static_cast<int32_t>(Names.size())).second)
+				Names.push_back(Name);
+		}
+
+		int32_t Get(FName Name) const
+		{
+			auto It = Indices.find(Name);
+			return It != Indices.end() ? It->second : InvalidNameIndex;
+		}
+	};
+
+	void CollectPropertyNames(FProperty Prop, FNameTable& Table, int Depth = 0)
+	{
+		if (!Prop || Depth > 8)
+			return;
+
+		switch (GetPropertyType(Prop))
+		{
+		case EPropertyType::EnumProperty:
+		{
+			auto EnumProp = Prop.Cast<FEnumProperty>();
+
+			if (EnumProp.GetEnum())
+				Table.Add(EnumProp.GetEnum().GetFName());
+
+			CollectPropertyNames(EnumProp.GetUnderlying(), Table, Depth + 1);
+			break;
+		}
+		case EPropertyType::EnumAsByteProperty:
+		{
+			Table.Add(Prop.Cast<FByteProperty>().GetEnum().GetFName());
+			break;
+		}
+		case EPropertyType::StructProperty:
+		{
+			if (auto Struct = Prop.Cast<FStructProperty>().GetStruct())
+				Table.Add(Struct.GetFName());
+
+			break;
+		}
+		case EPropertyType::SetProperty:
+		case EPropertyType::ArrayProperty:
+		case EPropertyType::OptionalProperty:
+		{
+			CollectPropertyNames(Prop.Cast<FArrayProperty>().GetInner(), Table, Depth + 1);
+			break;
+		}
+		case EPropertyType::MapProperty:
+		{
+			CollectPropertyNames(Prop.Cast<FMapProperty>().GetKey(), Table, Depth + 1);
+			CollectPropertyNames(Prop.Cast<FMapProperty>().GetValue(), Table, Depth + 1);
+			break;
+		}
+		default:
+			break;
+		}
+	}
+
+	void WriteProperty(StreamWriter& Buffer, const FNameTable& Table, FProperty Prop, int Depth = 0)
+	{
+		auto Type = Prop && Depth <= 8 ? GetPropertyType(Prop) : EPropertyType::Unknown;
+
+		Buffer.Write(Type == EPropertyType::EnumAsByteProperty ? EPropertyType::EnumProperty : Type);
 
 		switch (Type)
 		{
 		case EPropertyType::EnumProperty:
 		{
-			auto EnumProp = static_cast<FEnumProperty*>(Prop);
+			auto EnumProp = Prop.Cast<FEnumProperty>();
+			auto Enum = EnumProp.GetEnum();
 
-			auto Inner = EnumProp->GetUnderlying();
-			auto InnerType = GetPropertyType(Inner);
-			WritePropertyWrapper(Inner, InnerType);
-			Buffer.Write(NameMap[EnumProp->GetEnum()->GetFName()]);
-
+			WriteProperty(Buffer, Table, EnumProp.GetUnderlying(), Depth + 1);
+			Buffer.Write<int32_t>(Enum ? Table.Get(Enum.GetFName()) : InvalidNameIndex);
 			break;
 		}
 		case EPropertyType::EnumAsByteProperty:
 		{
 			Buffer.Write(EPropertyType::ByteProperty);
-			Buffer.Write(NameMap[static_cast<FByteProperty*>(Prop)->GetEnum()->GetFName()]);
-
+			Buffer.Write<int32_t>(Table.Get(Prop.Cast<FByteProperty>().GetEnum().GetFName()));
 			break;
 		}
 		case EPropertyType::StructProperty:
 		{
-			Buffer.Write(NameMap[static_cast<FStructProperty*>(Prop)->GetStruct()->GetFName()]);
+			auto Struct = Prop.Cast<FStructProperty>().GetStruct();
+
+			Buffer.Write<int32_t>(Struct ? Table.Get(Struct.GetFName()) : InvalidNameIndex);
 			break;
 		}
 		case EPropertyType::SetProperty:
 		case EPropertyType::ArrayProperty:
+		case EPropertyType::OptionalProperty:
 		{
-			auto Inner = static_cast<FArrayProperty*>(Prop)->GetInner();
-			auto InnerType = GetPropertyType(Inner);
-			WritePropertyWrapper(Inner, InnerType);
-
+			WriteProperty(Buffer, Table, Prop.Cast<FArrayProperty>().GetInner(), Depth + 1);
 			break;
 		}
 		case EPropertyType::MapProperty:
 		{
-			auto Inner = static_cast<FMapProperty*>(Prop)->GetKey();
-			auto InnerType = GetPropertyType(Inner);
-			WritePropertyWrapper(Inner, InnerType);
-
-			auto Value = static_cast<FMapProperty*>(Prop)->GetValue();
-			auto ValueType = GetPropertyType(Value);
-			WritePropertyWrapper(Value, ValueType);
-
+			WriteProperty(Buffer, Table, Prop.Cast<FMapProperty>().GetKey(), Depth + 1);
+			WriteProperty(Buffer, Table, Prop.Cast<FMapProperty>().GetValue(), Depth + 1);
 			break;
 		}
+		default:
+			break;
 		}
-	};
+	}
 
-	WritePropertyWrapper = WriteProperty;
+	template <typename Callback>
+	void ForEachProperty(UStruct Struct, Callback&& Func)
+	{
+		auto Prop = Struct.ChildProperties();
 
-	ObjObjects::ForEach([&](UObject*& Object)
+		for (int i = 0; Prop && i < MaxPropertiesPerStruct; i++)
 		{
-			if (Object->Class() == UClass::StaticClass() ||
-			Object->Class() == UScriptStruct::StaticClass())
+			Func(Prop);
+			Prop = Prop.GetNextProperty();
+		}
+	}
+
+	std::string_view StripEnumPrefix(std::string_view Name)
+	{
+		auto Find = Name.find("::");
+		return Find != std::string_view::npos ? Name.substr(Find + 2) : Name;
+	}
+}
+
+bool Dumper::Run(ECompressionMethod CompressionMethod, const std::filesystem::path& OutputPath)
+{
+	auto ClassClass = UClass::StaticClass();
+	auto ScriptStructClass = UScriptStruct::StaticClass();
+	auto EnumClass = UEnum::StaticClass();
+
+	if (!ClassClass || !ScriptStructClass || !EnumClass)
+	{
+		UE_LOG("Could not find the Class, ScriptStruct and Enum classes. The object paths can't be resolved, the Outer offset is probably wrong.");
+		return false;
+	}
+
+	FNameTable NameTable;
+
+	std::vector<UEnum> Enums;
+	std::vector<UStruct> Structs;
+
+	ObjObjects::ForEach([&](UObject Object)
+		{
+			auto Class = Object.Class();
+
+			if (Class == ClassClass || Class == ScriptStructClass)
 			{
-				auto Struct = static_cast<UStruct*>(Object);
-
-				Structs.push_back(Struct);
-
-				NameMap.insert_or_assign(Struct->GetFName(), 0);
-
-				if (Struct->Super() && !NameMap.contains(Struct->Super()->GetFName()))
-					NameMap.insert_or_assign(Struct->Super()->GetFName(), 0);
-
-				auto Props = Struct->ChildProperties();
-
-				while (Props)
-				{
-					NameMap.insert_or_assign(Props->GetFName(), 0);
-					Props = static_cast<FProperty*>(Props->GetNext());
-				}
+				Structs.push_back(Object.Cast<UStruct>());
 			}
-			else if (Object->Class() == UEnum::StaticClass())
+			else if (Class == EnumClass)
 			{
-				auto Enum = static_cast<UEnum*>(Object);
-				Enums.push_back(Enum);
-
-				NameMap.insert_or_assign(Enum->GetFName(), 0);
-
-				auto& EnumNames = Enum->Names();
-
-				for (auto i = 0; i < EnumNames.Num(); i++)
-				{
-					NameMap.insert_or_assign(EnumNames[i].Key.GetNumber(), 0);
-				}
+				Enums.push_back(Object.Cast<UEnum>());
 			}
 		});
 
-	Buffer.Write<int>(NameMap.size());
+	UE_LOG("Found %zu classes/structs and %zu enums in %d objects.", Structs.size(), Enums.size(), ObjObjects::Num());
 
-	int CurrentNameIndex = 0;
-
-	for (auto&& N : NameMap)
+	if (Structs.empty())
 	{
-		NameMap[N.first] = CurrentNameIndex;
-
-		auto Name = N.first.ToString();
-		std::string_view NameView = Name;
-
-		auto Find = Name.find("::");
-		if (Find != std::string::npos)
-		{
-			NameView = NameView.substr(Find + 2);
-		}
-
-		Buffer.Write<uint8_t>(NameView.length());
-		Buffer.WriteString(NameView);
-
-		CurrentNameIndex++;
+		UE_LOG("No classes or structs found, not writing an empty mappings file.");
+		return false;
 	}
-
-	Buffer.Write<uint32_t>(Enums.size());
 
 	for (auto Enum : Enums)
 	{
-		Buffer.Write(NameMap[Enum->GetFName()]);
+		NameTable.Add(Enum.GetFName());
 
-		auto& EnumNames = Enum->Names();
-		Buffer.Write<uint8_t>(EnumNames.Num());
-
-		for (size_t i = 0; i < EnumNames.Num(); i++)
-		{
-			Buffer.Write<int>(NameMap[EnumNames[i].Key]);
-		}
+		for (auto& [Key, Value] : Enum.Names())
+			NameTable.Add(Key);
 	}
 
-	Buffer.Write<uint32_t>(Structs.size());
+	size_t PropertyCount = 0;
 
 	for (auto Struct : Structs)
 	{
-		Buffer.Write(NameMap[Struct->GetFName()]);
-		Buffer.Write<int32_t>(Struct->Super() ? NameMap[Struct->Super()->GetFName()] : 0xffffffff);
+		NameTable.Add(Struct.GetFName());
 
-		std::vector<FPropertyData> Properties;
+		if (auto Super = Struct.Super())
+			NameTable.Add(Super.GetFName());
 
-		auto Props = Struct->ChildProperties();
-		uint16_t PropCount = 0;
-		uint16_t SerializablePropCount = 0;
+		ForEachProperty(Struct, [&](FProperty Prop)
+			{
+				NameTable.Add(Prop.GetFName());
+				CollectPropertyNames(Prop, NameTable);
+				PropertyCount++;
+			});
+	}
 
-		while (Props)
+	UE_LOG("Found %zu properties and %zu unique names.", PropertyCount, NameTable.Names.size());
+
+	StreamWriter Buffer;
+
+	Buffer.Write<uint32_t>(static_cast<uint32_t>(NameTable.Names.size()));
+
+	size_t UnresolvedNames = 0;
+
+	for (auto& N : NameTable.Names)
+	{
+		std::string Utf8;
+
+		if (!Names::TryToString(N, Utf8))
+			UnresolvedNames++;
+
+		auto View = StripEnumPrefix(Utf8);
+
+		if (View.size() > UINT16_MAX)
+			View = View.substr(0, UINT16_MAX);
+
+		Buffer.Write<uint16_t>(static_cast<uint16_t>(View.size()));
+		Buffer.WriteString(View);
+	}
+
+	if (UnresolvedNames)
+		UE_LOG("Warning: %zu names could not be resolved and were written empty.", UnresolvedNames);
+
+	Buffer.Write<uint32_t>(static_cast<uint32_t>(Enums.size()));
+
+	for (auto Enum : Enums)
+	{
+		Buffer.Write<int32_t>(NameTable.Get(Enum.GetFName()));
+
+		auto EnumNames = Enum.Names();
+		auto Count = static_cast<uint16_t>(std::min<size_t>(EnumNames.size(), UINT16_MAX));
+
+		Buffer.Write<uint16_t>(Count);
+
+		for (int i = 0; i < Count; i++)
 		{
-			FPropertyData Data(Props, PropCount);
-
-			Properties.push_back(Data);
-			Props = static_cast<FProperty*>(Props->GetNext());
-
-			PropCount += Data.ArrayDim;
-			SerializablePropCount++;
-		}
-
-		Buffer.Write(PropCount);
-		Buffer.Write(SerializablePropCount);
-
-		for (auto P : Properties)
-		{
-			Buffer.Write<uint16_t>(P.Index);
-			Buffer.Write(P.ArrayDim);
-			Buffer.Write(NameMap[P.Name]);
-
-			WriteProperty(P.Prop, P.PropertyType);
+			Buffer.Write<int64_t>(EnumNames[i].second);
+			Buffer.Write<int32_t>(NameTable.Get(EnumNames[i].first));
 		}
 	}
 
+	Buffer.Write<uint32_t>(static_cast<uint32_t>(Structs.size()));
+
+	for (auto Struct : Structs)
+	{
+		Buffer.Write<int32_t>(NameTable.Get(Struct.GetFName()));
+		Buffer.Write<int32_t>(Struct.Super() ? NameTable.Get(Struct.Super().GetFName()) : InvalidNameIndex);
+
+		std::vector<FProperty> Properties;
+		uint16_t PropCount = 0;
+
+		ForEachProperty(Struct, [&](FProperty Prop)
+			{
+				Properties.push_back(Prop);
+				PropCount += static_cast<uint8_t>(Prop.GetArrayDim());
+			});
+
+		Buffer.Write<uint16_t>(PropCount);
+		Buffer.Write<uint16_t>(static_cast<uint16_t>(Properties.size()));
+
+		uint16_t Index = 0;
+
+		for (auto Prop : Properties)
+		{
+			auto ArrayDim = static_cast<uint8_t>(Prop.GetArrayDim());
+
+			Buffer.Write<uint16_t>(Index);
+			Buffer.Write<uint8_t>(ArrayDim);
+			Buffer.Write<int32_t>(NameTable.Get(Prop.GetFName()));
+
+			WriteProperty(Buffer, NameTable, Prop);
+
+			Index += ArrayDim;
+		}
+	}
+
+	auto Uncompressed = Buffer.GetBuffer().str();
 	std::vector<uint8_t> UsmapData;
 
-	switch (CompressionMethod)
+	if (CompressionMethod == ECompressionMethod::Oodle)
 	{
-	case ECompressionMethod::Oodle:
-	{
-		UsmapData = Oodle::Compress(Buffer.GetBuffer());
-		break;
+#ifdef _WIN32
+		UsmapData = Oodle::Compress(Uncompressed);
+#endif
+
+		if (UsmapData.empty())
+		{
+			UE_LOG("Oodle isn't available (place oo2core_9_win64.dll next to the dumper), writing the mappings uncompressed.");
+			CompressionMethod = ECompressionMethod::None;
+		}
 	}
-	default:
+	else if (CompressionMethod != ECompressionMethod::None)
 	{
-		std::string UncompressedStream = Buffer.GetBuffer().str();
-		UsmapData.resize(UncompressedStream.size());
-		memcpy(UsmapData.data(), UncompressedStream.data(), UsmapData.size());
-	}
+		UE_LOG("Compression method %d isn't supported, writing the mappings uncompressed.", static_cast<int>(CompressionMethod));
+		CompressionMethod = ECompressionMethod::None;
 	}
 
-	auto FileOutput = FileWriter("Mappings.usmap");
+	if (CompressionMethod == ECompressionMethod::None)
+		UsmapData.assign(Uncompressed.begin(), Uncompressed.end());
+
+	FileWriter FileOutput(OutputPath);
+
+	if (!FileOutput.IsOpen())
+	{
+		UE_LOG("Could not open %s for writing.", Memory::PathToUtf8(OutputPath).c_str());
+		return false;
+	}
 
 	FileOutput.Write<uint16_t>(0x30C4); //magic
-	FileOutput.Write<uint8_t>(0); //version
+	FileOutput.Write(UsmapVersion); //version
+	FileOutput.Write<int32_t>(0);
 	FileOutput.Write(CompressionMethod); //compression
-	FileOutput.Write<uint32_t>(UsmapData.size()); //compressed size
-	FileOutput.Write<uint32_t>(Buffer.Size()); //decompressed size
+	FileOutput.Write<uint32_t>(static_cast<uint32_t>(UsmapData.size())); //compressed size
+	FileOutput.Write<uint32_t>(static_cast<uint32_t>(Uncompressed.size())); //decompressed size
 
 	FileOutput.Write(UsmapData.data(), UsmapData.size());
+
+	if (!FileOutput.Close())
+	{
+		UE_LOG("Failed to write %s.", Memory::PathToUtf8(OutputPath).c_str());
+		return false;
+	}
+
+	UE_LOG("Wrote %s (%zu bytes)", Memory::PathToUtf8(OutputPath).c_str(), UsmapData.size() + 16);
+
+	return true;
 }

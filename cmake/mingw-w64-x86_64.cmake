@@ -1,0 +1,15 @@
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+
+find_program(CMAKE_CXX_COMPILER NAMES x86_64-w64-mingw32-g++-posix x86_64-w64-mingw32-g++ REQUIRED)
+find_program(CMAKE_RC_COMPILER NAMES x86_64-w64-mingw32-windres windres)
+
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+
+find_program(UMD_WINE NAMES wine64 wine PATHS /usr/lib/wine /usr/lib64/wine /opt/wine-stable/bin)
+
+if(UMD_WINE)
+	set(CMAKE_CROSSCOMPILING_EMULATOR ${UMD_WINE})
+endif()

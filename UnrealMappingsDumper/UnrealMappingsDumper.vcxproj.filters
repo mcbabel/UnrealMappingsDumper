@@ -54,8 +54,17 @@
     <ClInclude Include="unrealContainers.h">
       <Filter>Core\Engine</Filter>
     </ClInclude>
-    <ClInclude Include="unrealFunctions.h">
+    <ClInclude Include="names.h">
       <Filter>Core\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="memory.h">
+      <Filter>Core\Scanning</Filter>
+    </ClInclude>
+    <ClInclude Include="Platform\Windows\LocalBackend.h">
+      <Filter>Core\Scanning</Filter>
+    </ClInclude>
+    <ClInclude Include="log.h">
+      <Filter>Core\App</Filter>
     </ClInclude>
     <ClInclude Include="scanning.h">
       <Filter>Core\Scanning</Filter>
@@ -91,6 +100,18 @@
     </ClCompile>
     <ClCompile Include="unrealVersion.cpp">
       <Filter>Core\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="names.cpp">
+      <Filter>Core\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="memory.cpp">
+      <Filter>Core\Scanning</Filter>
+    </ClCompile>
+    <ClCompile Include="Platform\Windows\LocalBackend.cpp">
+      <Filter>Core\Scanning</Filter>
+    </ClCompile>
+    <ClCompile Include="log.cpp">
+      <Filter>Core\App</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

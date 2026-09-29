@@ -1,18 +1,15 @@
 #pragma once
 
-static void UE_LOG(const char* str, ...)
-{
-	va_list fmt;
-	va_start(fmt, str);
-
-	printf("[=] ");
-	vprintf(str, fmt);
-	printf("\n");
-
-	va_end(fmt);
-}
+#include "log.h"
 
 namespace App
 {
-	bool Init();
+	struct FGameInfo
+	{
+		std::string ExecutableName;
+		std::string FileVersion;
+		float MajorMinor = 0;
+	};
+
+	bool Init(const FGameInfo& Game);
 }

@@ -1,135 +1,171 @@
 #pragma once
 
-#include <string>
-#include <winnt.h>
-#include <functional>
-
 #include "unrealEnums.h"
-#include "unrealFunctions.h"
-
-#define QUICK_OFFSET(type, offset) (*(type*)((uintptr_t)this + offset))
+#include "unrealContainers.h"
+#include "names.h"
+#include "memory.h"
 
 #define DECLARE_STATIC_CLASS(PATH) \
-    static FORCEINLINE class UClass* StaticClass() \
-	{ \
-		static auto Inst = ObjObjects::FindObject<class UClass>(PATH); \
-		return Inst; \
-	} \
+	static class UClass StaticClass(); \
 
 class FName
 {
 private:
 
+	uint32_t ComparisonIndex = 0;
+
 	uint32_t Number = 0;
-	uint32_t Padding = 0;
 
 public:
 
 	static inline bool IsOptimized = false;
 
-	__forceinline FName(int InNum) : Number(InNum), Padding(0)
+	FName() = default;
+
+	explicit FName(uint32_t InIndex, uint32_t InNumber = 0) : ComparisonIndex(InIndex), Number(InNumber)
 	{
 	}
 
-	__forceinline static std::string GetString(int Number)
+	FORCEINLINE uint32_t GetComparisonIndex() const
 	{
-		return FName(Number).ToString();
+		return ComparisonIndex;
 	}
 
-	__forceinline uint32_t GetNumber()
+	FORCEINLINE uint32_t GetNumber() const
 	{
-		return Number;
+		return IsOptimized ? 0 : Number;
 	}
 
-	bool operator== (FName n) const
+	bool operator==(const FName& Other) const
 	{
-		return Number == n.Number;
+		return ComparisonIndex == Other.ComparisonIndex && GetNumber() == Other.GetNumber();
 	}
 
 	friend size_t hash_value(const FName& p)
 	{
-		return size_t(p.Number);
-	}
-
-	std::wstring_view AsString() const
-	{
-		FString Ret;
-		FNameToString(this, Ret);
-
-		if (Ret.Data() != nullptr)
-		{
-			return std::wstring_view(Ret.Data());
-		}
-
-		return {};
+		return (size_t(p.GetNumber()) << 32) | p.ComparisonIndex;
 	}
 
 	std::string ToString() const
 	{
-		auto Ret = AsString();
-
-		return std::string(Ret.begin(), Ret.end());
+		return Names::ToString(*this);
 	}
 };
 
-class UObject
+class FRemoteObject
 {
-private:
+protected:
 
-	static inline int NameOffset = 0;
-	static inline int ClassOffset = 0;
-	static inline int OuterOffset = 0;
+	uintptr_t Address = 0;
 
-	friend struct IUnrealVersion;
+	template <typename T>
+	FORCEINLINE T Get(int Offset) const
+	{
+		return Memory::Fetch<T>(Address + Offset);
+	}
 
 public:
 
-	void GetPathName(std::wstring& Result, UObject* StopOuter = nullptr)
+	FRemoteObject() = default;
+
+	explicit FRemoteObject(uintptr_t InAddress) : Address(InAddress)
 	{
-		if (this == StopOuter || this == NULL)
+	}
+
+	FORCEINLINE uintptr_t GetAddress() const
+	{
+		return Address;
+	}
+
+	explicit operator bool() const
+	{
+		return Address != 0;
+	}
+
+	bool operator==(const FRemoteObject& Other) const
+	{
+		return Address == Other.Address;
+	}
+
+	template <typename T>
+	FORCEINLINE T Cast() const
+	{
+		return T(Address);
+	}
+};
+
+class UObject : public FRemoteObject
+{
+private:
+
+	static inline int IndexOffset = 0x0C;
+	static inline int ClassOffset = 0x10;
+	static inline int NameOffset = 0x18;
+	static inline int OuterOffset = 0x20;
+
+	friend struct IUnrealVersion;
+	friend struct OffsetFinder;
+
+public:
+
+	using FRemoteObject::FRemoteObject;
+
+	void GetPathName(std::string& Result, UObject StopOuter = UObject()) const
+	{
+		if (*this == StopOuter)
 		{
-			Result += L"None";
+			Result += "None";
 			return;
 		}
 
-		if (Outer() && Outer() != StopOuter)
+		auto OuterObj = Outer();
+
+		if (OuterObj && OuterObj != StopOuter)
 		{
-			Outer()->GetPathName(Result, StopOuter);
-			Result += L".";
+			OuterObj.GetPathName(Result, StopOuter);
+			Result += ".";
 		}
 
-		Result += GetFName().AsString();
+		Result += GetName();
 	}
 
-	FORCEINLINE std::wstring_view GetName()
+	FORCEINLINE int32_t GetIndex() const
 	{
-		auto& Name = QUICK_OFFSET(FName, NameOffset);
-		return Name.AsString();
+		return Get<int32_t>(IndexOffset);
 	}
 
-	FORCEINLINE FName GetFName()
+	FORCEINLINE FName GetFName() const
 	{
-		return QUICK_OFFSET(FName, NameOffset);
+		return Get<FName>(NameOffset);
 	}
 
-	FORCEINLINE std::wstring GetPath()
+	FORCEINLINE std::string GetName() const
 	{
-		std::wstring Ret;
+		return GetFName().ToString();
+	}
+
+	FORCEINLINE std::string GetPath() const
+	{
+		std::string Ret;
 
 		GetPathName(Ret);
 
 		return Ret;
 	}
 
-	FORCEINLINE class UClass* Class()
+	FORCEINLINE UObject ClassObject() const
 	{
-		return QUICK_OFFSET(class UClass*, ClassOffset);
+		return UObject(Get<uintptr_t>(ClassOffset));
 	}
 
-	FORCEINLINE UObject* Outer()
+	class UClass Class() const;
+
+	FORCEINLINE UObject Outer() const
 	{
-		return QUICK_OFFSET(UObject*, OuterOffset);
+		return UObject(Get<uintptr_t>(OuterOffset));
 	}
+
+	bool IsA(const class UClass& Cls) const;
 };
 
 class ObjObjects
@@ -139,84 +175,77 @@ class ObjObjects
 		NumElementsPerChunk = 64 * 1024,
 	};
 
-	static inline ObjObjects* Inst;
-
-public:
-
-	struct FUObjectItem
+	struct FHeader
 	{
-		UObject* Object;
-		int32_t Flags;
-		int32_t ClusterRootIndex;
-		int32_t SerialNumber;
+		uintptr_t Objects;
+		uintptr_t PreAllocatedObjects;
+		int32_t MaxElements;
+		int32_t NumElements;
+		int32_t MaxChunks;
+		int32_t NumChunks;
 	};
 
-	ObjObjects& operator=(const ObjObjects&) = delete;
+	static inline uintptr_t Inst = 0;
 
-private:
+	static inline int ItemSize = 0x18;
 
-	FUObjectItem** Objects;
-	FUObjectItem* PreAllocatedObjects;
-	int32_t MaxElements;
-	int32_t NumElements;
-	int32_t MaxChunks;
-	int32_t NumChunks;
+	friend struct OffsetFinder;
 
-public:
+	static FHeader GetHeader()
+	{
+		return Memory::Fetch<FHeader>(Inst);
+	}
 
-	static UObject* GetObjectByIndex(int Index)
+	static UObject GetObjectByIndex(const FHeader& Header, int Index)
 	{
 		int ChunkIndex = Index / NumElementsPerChunk;
 		int WithinChunkIndex = Index % NumElementsPerChunk;
 
-		if (
-			Index < Inst->NumElements &&
+		if (Index < Header.NumElements &&
 			Index >= 0 &&
-			ChunkIndex < Inst->NumChunks &&
-			Index < Inst->MaxElements
-			)
+			ChunkIndex < Header.NumChunks &&
+			Index < Header.MaxElements)
 		{
-			auto Chunk = Inst->Objects[ChunkIndex];
+			auto Chunk = Memory::Fetch<uintptr_t>(Header.Objects + ChunkIndex * sizeof(uintptr_t));
 
 			if (Chunk)
-				return (Chunk + WithinChunkIndex)->Object;
+				return UObject(Memory::Fetch<uintptr_t>(Chunk + static_cast<uintptr_t>(WithinChunkIndex) * ItemSize));
 		}
 
-		return nullptr;
+		return UObject();
+	}
+
+public:
+
+	static UObject GetObjectByIndex(int Index)
+	{
+		return GetObjectByIndex(GetHeader(), Index);
 	}
 
 	static FORCEINLINE int Num()
 	{
-		return Inst->NumElements;
+		return GetHeader().NumElements;
+	}
+
+	static FORCEINLINE uintptr_t GetInstance()
+	{
+		return Inst;
 	}
 
 	static void SetInstance(uintptr_t Val)
 	{
 		if (Val)
-			Inst = (ObjObjects*)Val;
+			Inst = Val;
 	}
 
-	template <class T = UObject>
-	static T* FindObjectByName(const wchar_t* ObjectName)
+	template <typename Callback>
+	static void ForEach(Callback&& Action)
 	{
-		for (int i = 0; i < Num(); i++)
+		auto Header = GetHeader();
+
+		for (int i = 0; i < Header.NumElements; i++)
 		{
-			auto Obj = GetObjectByIndex(i);
-
-			if (!Obj) continue;
-
-			if (Obj->GetName() == ObjectName)
-				return (T*)Obj;
-		}
-
-		return nullptr;
-	}
-
-	static void ForEach(std::function<void(UObject*&)> Action)
-	{
-		for (int i = 0; i < Num(); i++)
-		{
-			auto Obj = GetObjectByIndex(i);
+			auto Obj = GetObjectByIndex(Header, i);
 
 			if (!Obj) continue;
 
@@ -224,54 +253,86 @@ public:
 		}
 	}
 
-	template <class T>
-	static T* FindObject(std::wstring FullName)
+	static UObject FindObjectByName(std::string_view ObjectName, std::string_view ClassName = {})
 	{
-		for (int i = 0; i < Num(); i++)
+		auto Header = GetHeader();
+
+		for (int i = 0; i < Header.NumElements; i++)
 		{
-			auto Obj = GetObjectByIndex(i);
+			auto Obj = GetObjectByIndex(Header, i);
 
-			if (!Obj) continue;
-
-			auto Path = Obj->GetPath();
-
-			if (FullName.size() != Path.size())
+			if (!Obj || Obj.GetName() != ObjectName)
 				continue;
 
-			bool Same = wcsncmp(FullName.c_str(), Path.c_str(), FullName.size()) == 0;
+			if (!ClassName.empty() && (!Obj.ClassObject() || Obj.ClassObject().GetName() != ClassName))
+				continue;
 
-			if (Same)
-				return (T*)Obj;
+			return Obj;
 		}
 
-		return nullptr;
+		return UObject();
+	}
+
+	static UObject FindObject(const std::string& FullName)
+	{
+		auto ShortName = FullName.substr(FullName.find_last_of('.') + 1);
+
+		auto Header = GetHeader();
+
+		for (int i = 0; i < Header.NumElements; i++)
+		{
+			auto Obj = GetObjectByIndex(Header, i);
+
+			if (!Obj || Obj.GetName() != ShortName)
+				continue;
+
+			if (Obj.GetPath() == FullName)
+				return Obj;
+		}
+
+		return UObject();
 	}
 };
+
+class FProperty;
 
 class UStruct : public UObject
 {
 private:
 
-	static inline int SuperOffset = 0;
-	static inline int ChildPropertiesOffset = 0;
+	static inline int SuperOffset = 0x40;
+	static inline int ChildPropertiesOffset = 0x50;
 
 	friend struct IUnrealVersion;
+	friend struct OffsetFinder;
 
 public:
 
-	FORCEINLINE UStruct* Super()
+	using UObject::UObject;
+
+	FORCEINLINE UStruct Super() const
 	{
-		return QUICK_OFFSET(UStruct*, SuperOffset);
+		return UStruct(Get<uintptr_t>(SuperOffset));
 	}
 
-	FORCEINLINE int32_t PropertiesSize()
+	FORCEINLINE int32_t PropertiesSize() const
 	{
-		return QUICK_OFFSET(int32_t, ChildPropertiesOffset + sizeof(void*));
+		return Get<int32_t>(ChildPropertiesOffset + sizeof(void*));
 	}
 
-	FORCEINLINE class FProperty* ChildProperties()
+	FProperty ChildProperties() const;
+
+	bool IsChildOf(const UStruct& Other) const
 	{
-		return QUICK_OFFSET(class FProperty*, ChildPropertiesOffset);
+		auto Current = *this;
+
+		for (int i = 0; Current && i < 256; i++, Current = Current.Super())
+		{
+			if (Current == Other)
+				return true;
+		}
+
+		return false;
 	}
 };
 
@@ -279,207 +340,253 @@ class UClass : public UStruct
 {
 public:
 
-	DECLARE_STATIC_CLASS(L"/Script/CoreUObject.Class");
+	using UStruct::UStruct;
+
+	DECLARE_STATIC_CLASS("/Script/CoreUObject.Class");
 };
 
 class UScriptStruct : public UStruct
 {
 public:
 
-	DECLARE_STATIC_CLASS(L"/Script/CoreUObject.ScriptStruct");
+	using UStruct::UStruct;
+
+	DECLARE_STATIC_CLASS("/Script/CoreUObject.ScriptStruct");
 };
 
-class FFieldClass
+inline UClass UObject::Class() const
 {
-	FName Name;
-	EClassCastFlags Id;
+	return UClass(Get<uintptr_t>(ClassOffset));
+}
 
-public:
+inline bool UObject::IsA(const UClass& Cls) const
+{
+	return Class() && Class().IsChildOf(Cls);
+}
 
-	FORCEINLINE FName GetFName()
-	{
-		return Name;
-	}
-
-	FORCEINLINE std::wstring_view GetName()
-	{
-		return Name.AsString();
-	}
-
-	FORCEINLINE EClassCastFlags GetId()
-	{
-		return Id;
-	}
-};
-
-class FField
+class FFieldClass : public FRemoteObject
 {
 public:
 
-	class Variant
+	using FRemoteObject::FRemoteObject;
+
+	FORCEINLINE FName GetFName() const
 	{
-		union FFieldObjectUnion
-		{
-			FField* Field;
-			UObject* Object;
-		}Container;
+		return Get<FName>(0);
+	}
 
-		bool bIsUObject;
-	};
+	FORCEINLINE std::string GetName() const
+	{
+		return GetFName().ToString();
+	}
 
-private:
+	FORCEINLINE uint64_t GetId() const
+	{
+		return Get<uint64_t>(0x08);
+	}
 
-	void* Vtbl;
-	FFieldClass* ClassPrivate;
-	Variant Owner;
-	FField* Next;
-	FName NamePrivate;
-	EObjectFlags FlagsPrivate;
+	FORCEINLINE uint64_t GetCastFlags() const
+	{
+		return Get<uint64_t>(0x10);
+	}
+};
+
+class FField : public FRemoteObject
+{
+protected:
+
+	static inline int ClassOffset = 0x08;
+	static inline int NextOffset = 0x20;
+	static inline int NameOffset = 0x28;
+
+	friend struct IUnrealVersion;
+	friend struct OffsetFinder;
 
 public:
 
-	FORCEINLINE FName& GetFName()
+	using FRemoteObject::FRemoteObject;
+
+	FORCEINLINE FName GetFName() const
 	{
-		return NamePrivate;
+		return Get<FName>(NameOffset);
 	}
 
-	FORCEINLINE FField* GetNext() const
+	FORCEINLINE FField GetNext() const
 	{
-		return Next;
+		return FField(Get<uintptr_t>(NextOffset));
 	}
 
-	FORCEINLINE FFieldClass* GetClass() const
+	FORCEINLINE FFieldClass GetClass() const
 	{
-		return ClassPrivate;
-	}
-
-	FORCEINLINE EObjectFlags GetFlags() const
-	{
-		if (FName::IsOptimized)
-		{
-			return QUICK_OFFSET(EObjectFlags, offsetof(FField, NamePrivate) + 4);
-		}
-
-		return FlagsPrivate;
+		return FFieldClass(Get<uintptr_t>(ClassOffset));
 	}
 };
 
 class FProperty : public FField
 {
-private:
-
-	int32_t ArrayDim;
-
 protected:
 
-	static inline int FPropertySize = 0;
+	static inline int ArrayDimOffset = 0x38;
+	static inline int FPropertySize = 0x78;
+
+	friend struct IUnrealVersion;
+	friend struct OffsetFinder;
+
+	FORCEINLINE uintptr_t Member(int Index) const
+	{
+		return Get<uintptr_t>(FPropertySize + Index * static_cast<int>(sizeof(uintptr_t)));
+	}
 
 public:
 
-	friend struct IUnrealVersion;
+	using FField::FField;
 
-	FORCEINLINE int32_t GetArrayDim()
+	FORCEINLINE FProperty GetNextProperty() const
 	{
-		if (FName::IsOptimized)
-		{
-			return QUICK_OFFSET(int32_t, sizeof(FField) - 8);
-		}
+		return FProperty(Get<uintptr_t>(NextOffset));
+	}
 
-		return ArrayDim;
+	FORCEINLINE int32_t GetArrayDim() const
+	{
+		return Get<int32_t>(ArrayDimOffset);
+	}
+
+	FORCEINLINE int32_t GetElementSize() const
+	{
+		return Get<int32_t>(ArrayDimOffset + sizeof(int32_t));
 	}
 };
 
+inline FProperty UStruct::ChildProperties() const
+{
+	return FProperty(Get<uintptr_t>(ChildPropertiesOffset));
+}
+
 class UEnum : public UObject
 {
+	static inline int NamesOffset = 0x40;
+
+	friend struct IUnrealVersion;
+	friend struct OffsetFinder;
+
 public:
 
-	typedef TArray<TPair<FName, int64_t>> EnumNameMap;
+	using UObject::UObject;
 
-	EnumNameMap& Names()
+	std::vector<std::pair<FName, int64_t>> Names() const
 	{
-		static auto FieldSize = ObjObjects::FindObject<UStruct>(L"/Script/CoreUObject.Field")->PropertiesSize();
+		struct FEntry
+		{
+			FName Key;
+			int64_t Value;
+		};
 
-		return QUICK_OFFSET(EnumNameMap, FieldSize + sizeof(FString));
+		auto Data = Get<uintptr_t>(NamesOffset);
+		auto Num = Get<int32_t>(NamesOffset + sizeof(uintptr_t));
+
+		std::vector<std::pair<FName, int64_t>> Ret;
+
+		if (!Data || Num <= 0 || Num > 0x10000)
+			return Ret;
+
+		std::vector<FEntry> Entries(Num);
+
+		if (!Memory::ReadRaw(Data, Entries.data(), Entries.size() * sizeof(FEntry)))
+			return Ret;
+
+		for (auto& Entry : Entries)
+			Ret.emplace_back(Entry.Key, Entry.Value);
+
+		return Ret;
 	}
 
-	DECLARE_STATIC_CLASS(L"/Script/CoreUObject.Enum");
+	DECLARE_STATIC_CLASS("/Script/CoreUObject.Enum");
 };
 
 class FStructProperty : public FProperty
 {
-	UScriptStruct* Struct;
-
 public:
 
-	FORCEINLINE UScriptStruct* GetStruct()
+	using FProperty::FProperty;
+
+	FORCEINLINE UScriptStruct GetStruct() const
 	{
-		return QUICK_OFFSET(UScriptStruct*, FPropertySize);
+		return UScriptStruct(Member(0));
 	}
 };
 
 class FByteProperty : public FProperty
 {
-	UEnum* Enum;
-
 public:
 
-	FORCEINLINE UEnum* GetEnum()
+	using FProperty::FProperty;
+
+	FORCEINLINE UEnum GetEnum() const
 	{
-		return QUICK_OFFSET(UEnum*, FPropertySize);
+		return UEnum(Member(0));
 	}
 };
 
 class FArrayProperty : public FProperty
 {
-	enum class EArrayPropertyFlags
-	{
-		None,
-		UsesMemoryImageAllocator
-	};
-
-	FProperty* Inner;
-	EArrayPropertyFlags ArrayFlags;
-
 public:
 
-	FORCEINLINE FProperty* GetInner()
+	using FProperty::FProperty;
+
+	FORCEINLINE FProperty GetInner() const
 	{
-		return QUICK_OFFSET(FProperty*, FPropertySize);
+		return FProperty(Member(0));
 	}
 };
 
 class FMapProperty : public FProperty
 {
-	FProperty* KeyProp;
-	FProperty* ValueProp;
-
 public:
 
-	FORCEINLINE FProperty* GetKey()
+	using FProperty::FProperty;
+
+	FORCEINLINE FProperty GetKey() const
 	{
-		return QUICK_OFFSET(FProperty*, FPropertySize);
+		return FProperty(Member(0));
 	}
 
-	FORCEINLINE FProperty* GetValue()
+	FORCEINLINE FProperty GetValue() const
 	{
-		return QUICK_OFFSET(FProperty*, FPropertySize + sizeof(FProperty*));
+		return FProperty(Member(1));
 	}
 };
 
 class FEnumProperty : public FProperty
 {
-	FProperty* UnderlyingProp;
-	UEnum* Enum;
-
 public:
 
-	FORCEINLINE FProperty* GetUnderlying()
+	using FProperty::FProperty;
+
+	FORCEINLINE FProperty GetUnderlying() const
 	{
-		return QUICK_OFFSET(FProperty*, FPropertySize);
+		return FProperty(Member(0));
 	}
 
-	FORCEINLINE UEnum* GetEnum()
+	FORCEINLINE UEnum GetEnum() const
 	{
-		return QUICK_OFFSET(UEnum*, FPropertySize + sizeof(FProperty*));
+		return UEnum(Member(1));
 	}
 };
+
+inline UClass UClass::StaticClass()
+{
+	static auto Inst = ObjObjects::FindObject("/Script/CoreUObject.Class").Cast<UClass>();
+	return Inst;
+}
+
+inline UClass UScriptStruct::StaticClass()
+{
+	static auto Inst = ObjObjects::FindObject("/Script/CoreUObject.ScriptStruct").Cast<UClass>();
+	return Inst;
+}
+
+inline UClass UEnum::StaticClass()
+{
+	static auto Inst = ObjObjects::FindObject("/Script/CoreUObject.Enum").Cast<UClass>();
+	return Inst;
+}

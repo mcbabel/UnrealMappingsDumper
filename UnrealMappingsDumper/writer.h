@@ -1,60 +1,34 @@
 #pragma once
 
-class IBufferWriter
-{
-public:
-
-    virtual FORCEINLINE void WriteString(std::string String) = 0;
-    virtual FORCEINLINE void WriteString(std::string_view String) = 0;
-    virtual FORCEINLINE void Write(void* Input, size_t Size) = 0;
-    virtual FORCEINLINE void Seek(int Pos, int Origin = SEEK_CUR) = 0;
-    virtual uint32_t Size() = 0;
-};
-
-class StreamWriter : IBufferWriter
+class StreamWriter
 {
     std::stringstream m_Stream;
 
 public:
-
-    ~StreamWriter()
-    {
-        m_Stream.flush();
-    }
 
     FORCEINLINE std::stringstream& GetBuffer()
     {
         return m_Stream;
     }
 
-    FORCEINLINE void WriteString(std::string String) override
-    {
-        m_Stream.write(String.c_str(), String.size());
-    }
-
-    FORCEINLINE void WriteString(std::string_view String) override
+    FORCEINLINE void WriteString(std::string_view String)
     {
         m_Stream.write(String.data(), String.size());
     }
 
-    FORCEINLINE void Write(void* Input, size_t Size) override
+    FORCEINLINE void Write(const void* Input, size_t Size)
     {
-        m_Stream.write((char*)Input, Size);
+        m_Stream.write(static_cast<const char*>(Input), Size);
     }
 
-    FORCEINLINE void Seek(int Pos, int Origin = SEEK_CUR) override
+    uint32_t Size()
     {
-        m_Stream.seekp(Pos, Origin);
-    }
+        auto Pos = m_Stream.tellp();
+        m_Stream.seekp(0, std::ios::end);
+        auto Ret = m_Stream.tellp();
+        m_Stream.seekp(Pos, std::ios::beg);
 
-    uint32_t Size() override
-    {
-        auto pos = m_Stream.tellp();
-        this->Seek(0, SEEK_END);
-        auto ret = m_Stream.tellp();
-        this->Seek(pos, SEEK_SET);
-
-        return ret;
+        return static_cast<uint32_t>(Ret);
     }
 
     template <typename T>
@@ -64,49 +38,66 @@ public:
     }
 };
 
-class FileWriter : IBufferWriter
+class FileWriter
 {
-    FILE* m_File;
+    FILE* m_File = nullptr;
+    bool m_bFailed = false;
 
 public:
 
-    FileWriter(const char* FileName)
+    explicit FileWriter(const std::filesystem::path& FileName)
     {
-        fopen_s(&m_File, FileName, "wb");
+#ifdef _WIN32
+        if (_wfopen_s(&m_File, FileName.c_str(), L"wb") != 0)
+            m_File = nullptr;
+#else
+        m_File = std::fopen(FileName.c_str(), "wb");
+#endif
+
+        m_bFailed = m_File == nullptr;
     }
 
     ~FileWriter()
     {
-        std::fclose(m_File);
+        Close();
     }
 
-    FORCEINLINE void WriteString(std::string String) override
+    FileWriter(const FileWriter&) = delete;
+    FileWriter& operator=(const FileWriter&) = delete;
+
+    bool IsOpen() const
     {
-        std::fwrite(String.c_str(), String.length(), 1, m_File);
+        return m_File != nullptr;
     }
 
-    FORCEINLINE void WriteString(std::string_view String) override
+    bool HasFailed() const
     {
-        std::fwrite(String.data(), String.size(), 1, m_File);
+        return m_bFailed;
     }
 
-    FORCEINLINE void Write(void* Input, size_t Size) override
+    bool Close()
     {
-        std::fwrite(Input, Size, 1, m_File);
+        if (m_File)
+        {
+            if (std::fclose(m_File) != 0)
+                m_bFailed = true;
+
+            m_File = nullptr;
+        }
+
+        return !m_bFailed;
     }
 
-    FORCEINLINE void Seek(int Pos, int Origin = SEEK_CUR) override
+    void Write(const void* Input, size_t Size)
     {
-        std::fseek(m_File, Pos, Origin);
-    }
+        if (!m_File)
+        {
+            m_bFailed = true;
+            return;
+        }
 
-    uint32_t Size() override
-    {
-        auto pos = std::ftell(m_File);
-        std::fseek(m_File, 0, SEEK_END);
-        auto ret = std::ftell(m_File);
-        std::fseek(m_File, pos, SEEK_SET);
-        return ret;
+        if (Size && std::fwrite(Input, Size, 1, m_File) != 1)
+            m_bFailed = true;
     }
 
     template <typename T>

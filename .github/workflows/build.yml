@@ -1,0 +1,170 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build Visual Studio solution
+        run: msbuild UnrealMappingsDumper.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Configure CMake
+        run: cmake -S . -B build -A x64
+
+      - name: Build CMake
+        run: cmake --build build --config Release
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Injection test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path e2e | Out-Null
+          Copy-Item build/Release/UnrealMappingsDumper.Tests.exe e2e/FakeGame-Win64-Shipping.exe
+          $game = Start-Process -FilePath e2e/FakeGame-Win64-Shipping.exe -ArgumentList "host", "newfield" -PassThru -RedirectStandardError e2e/host.err -RedirectStandardOutput e2e/host.out
+          $null = $game.Handle
+          Start-Sleep -Seconds 3
+          ./build/Release/UnrealMappingsInjector.exe --dll build/Release/UnrealMappingsDumper.dll FakeGame
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $game.WaitForExit()
+          Get-Content e2e/host.err
+          Get-Content e2e/UnrealMappingsDumper.log -ErrorAction SilentlyContinue
+          exit $game.ExitCode
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item build/Release/UnrealMappingsDumper.dll, build/Release/UnrealMappingsInjector.exe, scripts/inject-linux.sh, README.md, LICENSE package/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnrealMappingsDumper
+          path: package/
+
+  linux:
+    name: Linux (native + MinGW + Wine)
+    runs-on: ubuntu-24.04
+    env:
+      WINEDEBUG: -all
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ g++-mingw-w64-x86-64-posix wine64
+
+      - name: Build native
+        run: |
+          cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-linux
+
+      - name: Test native
+        run: ctest --test-dir build-linux --output-on-failure
+
+      - name: Build Windows (MinGW)
+        run: |
+          cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake
+          cmake --build build-mingw
+
+      - name: Test Windows build with Wine
+        run: ctest --test-dir build-mingw --output-on-failure
+
+      - name: Dump a native game
+        run: |
+          mkdir -p e2e/native
+          cp build-linux/UnrealMappingsDumper.Tests e2e/native/FakeGame-Linux-Shipping
+          (cd e2e/native && ./FakeGame-Linux-Shipping host newfield > host.log 2>&1) &
+          GAME=$!
+          sleep 2
+          sudo build-linux/unreal-mappings-dumper FakeGame
+          status=0
+          wait $GAME || status=$?
+          cat e2e/native/host.log
+          exit $status
+
+      - name: Dump a Wine game with the native dumper
+        run: |
+          WINE=$(command -v wine64 || echo /usr/lib/wine/wine64)
+          mkdir -p e2e/wine
+          cp build-mingw/UnrealMappingsDumper.Tests.exe e2e/wine/FakeGame-Win64-Shipping.exe
+          (cd e2e/wine && "$WINE" FakeGame-Win64-Shipping.exe host optimized > host.log 2>&1) &
+          GAME=$!
+          for attempt in $(seq 1 30); do
+            if sudo build-linux/unreal-mappings-dumper FakeGame; then break; fi
+            sleep 2
+          done
+          status=0
+          wait $GAME || status=$?
+          cat e2e/wine/host.log
+          exit $status
+
+      - name: Inject into a Wine game
+        run: |
+          WINE=$(command -v wine64 || echo /usr/lib/wine/wine64)
+          mkdir -p e2e/inject/game e2e/inject/tool
+          cp build-mingw/UnrealMappingsDumper.Tests.exe e2e/inject/game/FakeGame-Win64-Shipping.exe
+          cp build-mingw/UnrealMappingsDumper.dll build-mingw/UnrealMappingsInjector.exe scripts/inject-linux.sh e2e/inject/tool/
+          (cd e2e/inject/game && "$WINE" FakeGame-Win64-Shipping.exe host newfield > host.log 2>&1) &
+          GAME=$!
+          for attempt in $(seq 1 30); do
+            if e2e/inject/tool/inject-linux.sh FakeGame; then break; fi
+            sleep 2
+          done
+          status=0
+          wait $GAME || status=$?
+          cat e2e/inject/game/host.log
+          cat e2e/inject/game/UnrealMappingsDumper.log || true
+          exit $status
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UnrealMappingsDumper-linux
+          path: build-linux/unreal-mappings-dumper
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: UnrealMappingsDumper
+          path: UnrealMappingsDumper
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: UnrealMappingsDumper-linux
+          path: linux
+
+      - name: Package
+        run: |
+          chmod +x UnrealMappingsDumper/inject-linux.sh linux/unreal-mappings-dumper
+          zip -r UnrealMappingsDumper-${{ github.ref_name }}-windows.zip UnrealMappingsDumper
+          tar -czf UnrealMappingsDumper-${{ github.ref_name }}-linux-x86_64.tar.gz -C linux unreal-mappings-dumper -C ../UnrealMappingsDumper README.md LICENSE UnrealMappingsDumper.dll UnrealMappingsInjector.exe inject-linux.sh
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            UnrealMappingsDumper-${{ github.ref_name }}-windows.zip
+            UnrealMappingsDumper-${{ github.ref_name }}-linux-x86_64.tar.gz
+          generate_release_notes: true

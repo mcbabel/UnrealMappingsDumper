@@ -1,0 +1,52 @@
+name: Game not working
+description: The dumper fails, crashes or writes broken mappings for a game
+labels: ["game support"]
+body:
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: Name of the game, and a store or download link if it's free
+    validations:
+      required: true
+  - type: input
+    id: engine
+    attributes:
+      label: Unreal Engine version
+      placeholder: "5.4"
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Linux (native game)
+        - Linux (Steam Proton)
+        - Linux (Wine, Lutris, Bottles, ...)
+    validations:
+      required: true
+  - type: dropdown
+    id: injection
+    attributes:
+      label: How was the dumper used?
+      options:
+        - unreal-mappings-dumper (native Linux)
+        - UnrealMappingsInjector.exe
+        - inject-linux.sh
+        - Other injector
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: UnrealMappingsDumper.log
+      description: The log file is written next to the game executable (or next to the dll, to %TEMP%\UnrealMappingsDumper or the current directory). Paste its whole content here.
+      render: text
+    validations:
+      required: true

@@ -5,7 +5,20 @@ enum class ECompressionMethod : uint8_t
 	None,
 	Oodle,
 	Brotli,
+	ZStandard,
 	Unknown = 0xFF
+};
+
+enum class EUsmapVersion : uint8_t
+{
+	Initial,
+	PackageVersioning,
+	LongFName,
+	LargeEnums,
+	ExplicitEnumValues,
+
+	LatestPlusOne,
+	Latest = LatestPlusOne - 1
 };
 
 enum class EPropertyType : uint8_t
@@ -38,7 +51,11 @@ enum class EPropertyType : uint8_t
 	SetProperty,
 	EnumProperty,
 	FieldPathProperty,
-	EnumAsByteProperty,
+	OptionalProperty,
+	Utf8StrProperty,
+	AnsiStrProperty,
+
+	EnumAsByteProperty = 0xFE,
 
 	Unknown = 0xFF
 };
@@ -132,7 +149,7 @@ enum EPropertyFlags : uint64_t
 	CPF_SkipSerialization = 0x0080000000000000,	///< Property shouldn't be serialized, can still be exported to text
 };
 
-enum EObjectFlags : __int32
+enum EObjectFlags : int32_t
 {
 	RF_NoFlags = 0x0,
 	RF_Public = 0x1,
@@ -166,7 +183,7 @@ enum EObjectFlags : __int32
 	RF_HasExternalPackage = 0x10000000,
 };
 
-enum EClassCastFlags : __int64
+enum EClassCastFlags : int64_t
 {
 	CASTCLASS_None = 0x0000000000000000,
 
