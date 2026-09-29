@@ -28,7 +28,7 @@ bool App::Init(const FGameInfo& Game)
 
 	bool bLooksLikeUnreal = false;
 
-	for (auto Marker : { "-win64-", "-wingdk-", "-linux-", "-linuxarm64-" })
+	for (auto Marker : { "-win64-", "-wingdk-", "-linux-shipping", "-linux-test", "-linux-development", "-linux-debuggame", "-linuxarm64-" })
 	{
 		if (LowerName.find(Marker) != std::string::npos)
 			bLooksLikeUnreal = true;

@@ -18,10 +18,19 @@ namespace
 
 	bool IsUnrealName(const std::string& LowerName)
 	{
-		for (auto Marker : { "-win64-", "-wingdk-", "-linux-", "-linuxarm64-" })
+		for (auto Marker : { "-win64-", "-wingdk-" })
 		{
-			if (LowerName.find(Marker) != std::string::npos)
+			if (LowerName.find(Marker) != std::string::npos && LowerName.ends_with(".exe"))
 				return true;
+		}
+
+		for (auto Platform : { "-linux-", "-linuxarm64-" })
+		{
+			for (auto Configuration : { "shipping", "test", "development", "debuggame", "debug" })
+			{
+				if (LowerName.ends_with(std::string(Platform) + Configuration))
+					return true;
+			}
 		}
 
 		return false;
