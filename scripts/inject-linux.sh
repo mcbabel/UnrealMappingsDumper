@@ -148,7 +148,7 @@ fi
 GAME_ENV=()
 while IFS= read -r -d '' entry; do
 	case "$entry" in
-		LD_PRELOAD=*) ;;
+		LD_PRELOAD=*|WINESERVERSOCKET=*|WINEPRELOADRESERVE=*|WINELOADERNOEXEC=*) ;;
 		*) GAME_ENV+=("$entry") ;;
 	esac
 done < "/proc/$GAME_PID/environ"
