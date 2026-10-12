@@ -1,9 +1,13 @@
 
 #include "../UnrealMappingsDumper/pch.h"
 
+#include "../UnrealMappingsDumper/aes.h"
+#include "../UnrealMappingsDumper/aeskey.h"
 #include "../UnrealMappingsDumper/app.h"
+#include "../UnrealMappingsDumper/cli.h"
 #include "../UnrealMappingsDumper/dumper.h"
 #include "../UnrealMappingsDumper/memory.h"
+#include "../UnrealMappingsDumper/process.h"
 
 #include <map>
 #include <thread>
@@ -685,9 +689,484 @@ int RunAgainstChild(const std::string& LayoutName, const std::filesystem::path& 
 }
 #endif
 
+namespace AesTest
+{
+	constexpr Aes::FKey MainKey =
+	{
+		0x1F, 0x8E, 0x52, 0xC4, 0x7A, 0x09, 0xB3, 0xE6, 0x2D, 0x91, 0x5C, 0xF0, 0x48, 0xA7, 0x13, 0x6B,
+		0xD2, 0x3E, 0x85, 0x0F, 0xC9, 0x74, 0xEA, 0x21, 0x96, 0x5B, 0x07, 0xBD, 0x68, 0xF3, 0x4A, 0x1C,
+	};
+
+	constexpr Aes::FKey DynamicKey =
+	{
+		0x63, 0xA1, 0x0E, 0xD7, 0x39, 0xF4, 0x82, 0x5D, 0xB6, 0x17, 0xC8, 0x4F, 0xE3, 0x2A, 0x95, 0x70,
+		0x0B, 0xDE, 0x56, 0x8C, 0x31, 0xFA, 0x47, 0xA9, 0x14, 0x6E, 0xC2, 0x9B, 0x25, 0x7D, 0xE8, 0x50,
+	};
+
+	constexpr AesKey::FGuid DynamicGuid =
+	{
+		0x4D, 0x3C, 0x2B, 0x1A, 0x8F, 0x7E, 0x6D, 0x5C, 0x13, 0x24, 0x35, 0x46, 0x97, 0xA8, 0xB9, 0xCA,
+	};
+
+#ifdef _MSC_VER
+	__declspec(noinline)
+#else
+	[[gnu::noinline]]
+#endif
+	void RegisterEncryptionKeyCallback(unsigned char OutKey[32])
+	{
+		const unsigned char Key[32] =
+		{
+			0x1F, 0x8E, 0x52, 0xC4, 0x7A, 0x09, 0xB3, 0xE6, 0x2D, 0x91, 0x5C, 0xF0, 0x48, 0xA7, 0x13, 0x6B,
+			0xD2, 0x3E, 0x85, 0x0F, 0xC9, 0x74, 0xEA, 0x21, 0x96, 0x5B, 0x07, 0xBD, 0x68, 0xF3, 0x4A, 0x1C,
+		};
+
+		for (int ByteIndex = 0; ByteIndex < 32; ++ByteIndex)
+			OutKey[ByteIndex] = Key[ByteIndex];
+	}
+
+	void (*volatile KeyCallback)(unsigned char*) = &RegisterEncryptionKeyCallback;
+	uint8_t* volatile KeyRegistry = nullptr;
+	volatile uint8_t KeySalt = 0;
+
+	template <typename T>
+	void Append(std::vector<uint8_t>& Data, const T& Value)
+	{
+		auto Bytes = reinterpret_cast<const uint8_t*>(&Value);
+		Data.insert(Data.end(), Bytes, Bytes + sizeof(T));
+	}
+
+	void Append(std::vector<uint8_t>& Data, size_t Count, uint8_t Value)
+	{
+		Data.insert(Data.end(), Count, Value);
+	}
+
+	template <typename T>
+	void Put(std::vector<uint8_t>& Data, size_t Offset, const T& Value)
+	{
+		memcpy(Data.data() + Offset, &Value, sizeof(T));
+	}
+
+	std::vector<uint8_t> MakeIndex(size_t Size, const Aes::FKey* Key)
+	{
+		std::vector<uint8_t> Index(Size, 0xAB);
+		Put<int32_t>(Index, 0, 10);
+		memcpy(Index.data() + 4, "../../../", 10);
+
+		if (Key)
+			Aes::FCipher(Key->data()).EncryptInPlace(Index.data(), Index.size());
+
+		return Index;
+	}
+
+	std::vector<uint8_t> MakePak(const Aes::FKey* Key, const AesKey::FGuid& Guid)
+	{
+		std::vector<uint8_t> Data(100, 0x11);
+		auto Index = MakeIndex(48, Key);
+
+		int64_t IndexOffset = static_cast<int64_t>(Data.size());
+		int64_t IndexSize = static_cast<int64_t>(Index.size());
+		Data.insert(Data.end(), Index.begin(), Index.end());
+
+		Data.insert(Data.end(), Guid.begin(), Guid.end());
+		Append<uint8_t>(Data, Key ? 1 : 0);
+		Append<uint32_t>(Data, 0x5A6F12E1);
+		Append<int32_t>(Data, 11);
+		Append(Data, IndexOffset);
+		Append(Data, IndexSize);
+		Append(Data, 20, 0x5C);
+
+		std::vector<uint8_t> Names(5 * 32, 0);
+		memcpy(Names.data(), "Oodle", 5);
+		Data.insert(Data.end(), Names.begin(), Names.end());
+
+		return Data;
+	}
+
+	std::vector<uint8_t> MakeToc(const Aes::FKey& Key, const AesKey::FGuid& Guid, bool bSigned)
+	{
+		constexpr uint32_t EntryCount = 2;
+		constexpr uint32_t BlockCount = 3;
+		constexpr uint32_t SeedCount = 2;
+		constexpr uint32_t OverflowCount = 1;
+
+		std::vector<uint8_t> Data(144, 0);
+		memcpy(Data.data(), "-==--==--==--==-", 16);
+		Data[16] = 8;
+		Put<uint32_t>(Data, 20, 144);
+		Put<uint32_t>(Data, 24, EntryCount);
+		Put<uint32_t>(Data, 28, BlockCount);
+		Put<uint32_t>(Data, 32, 12);
+		Put<uint32_t>(Data, 36, 1);
+		Put<uint32_t>(Data, 40, 32);
+		Put<uint32_t>(Data, 44, 0x10000);
+		Put<uint32_t>(Data, 48, 32);
+		Put<uint32_t>(Data, 52, 1);
+		memcpy(Data.data() + 64, Guid.data(), 16);
+		Data[80] = static_cast<uint8_t>(1 | 2 | 8 | (bSigned ? 4 : 0));
+		Put<uint32_t>(Data, 84, SeedCount);
+		Put<uint32_t>(Data, 96, OverflowCount);
+
+		Append(Data, EntryCount * 12 + EntryCount * 10, 0x21);
+		Append(Data, (SeedCount + OverflowCount) * 4, 0x22);
+		Append(Data, BlockCount * 12, 0x23);
+		Append(Data, 32, 0);
+
+		if (bSigned)
+		{
+			Append<int32_t>(Data, 256);
+			Append(Data, 512, 0x24);
+			Append(Data, BlockCount * 20, 0x25);
+		}
+
+		auto Index = MakeIndex(32, &Key);
+		Data.insert(Data.end(), Index.begin(), Index.end());
+		Append(Data, 40, 0x26);
+
+		return Data;
+	}
+
+	bool WriteBytes(const std::filesystem::path& Path, const std::vector<uint8_t>& Data)
+	{
+		std::ofstream File(Path, std::ios::binary | std::ios::trunc);
+		File.write(reinterpret_cast<const char*>(Data.data()), static_cast<std::streamsize>(Data.size()));
+		return static_cast<bool>(File);
+	}
+
+	std::vector<AesKey::FCandidate> Scan(const std::vector<uint8_t>& Code)
+	{
+		constexpr uintptr_t Base = 0x140001000;
+
+		AesKey::FReadFunction Read = [&](uintptr_t Address, void* Out, size_t Size)
+			{
+				if (Address < Base || Address + Size > Base + Code.size())
+					return false;
+
+				memcpy(Out, Code.data() + (Address - Base), Size);
+				return true;
+			};
+
+		return AesKey::ScanCode(Code.data(), Code.size(), Code.size(), Base, Read);
+	}
+
+	bool Contains(const std::vector<AesKey::FCandidate>& Candidates, const Aes::FKey& Key)
+	{
+		return std::any_of(Candidates.begin(), Candidates.end(), [&](const AesKey::FCandidate& C) { return C.Key == Key; });
+	}
+
+	void CheckCipher()
+	{
+		Aes::FKey Key;
+		Aes::FBlock Plain;
+
+		for (int i = 0; i < 32; i++)
+			Key[i] = static_cast<uint8_t>(i);
+
+		for (int i = 0; i < 16; i++)
+			Plain[i] = static_cast<uint8_t>(i * 0x11);
+
+		Aes::FCipher Cipher(Key.data());
+		auto Encrypted = Cipher.Encrypt(Plain);
+
+		constexpr Aes::FBlock Expected = { 0x8E, 0xA2, 0xB7, 0xCA, 0x51, 0x67, 0x45, 0xBF, 0xEA, 0xFC, 0x49, 0x90, 0x4B, 0x49, 0x60, 0x89 };
+
+		Check(Encrypted == Expected, "AES-256 matches the FIPS-197 test vector");
+		Check(Cipher.Decrypt(Encrypted) == Plain, "AES-256 decrypts what it encrypted");
+		Check(Aes::FromHex(Aes::ToHex(MainKey)) == MainKey, "AES key hex round trip");
+		Check(!Aes::FromHex("0x12345").has_value() && !Aes::FromHex(std::string(64, 'g')).has_value(), "invalid hex keys are rejected");
+	}
+
+	void CheckScanner()
+	{
+		std::vector<uint8_t> Code(16, 0xCC);
+
+		for (int i = 0; i < 8; i++)
+		{
+			Code.push_back(0xC7);
+
+			if (i == 0)
+			{
+				Code.push_back(0x01);
+			}
+			else
+			{
+				Code.push_back(0x41);
+				Code.push_back(static_cast<uint8_t>(i * 4));
+			}
+
+			Append(Code, *reinterpret_cast<const uint32_t*>(MainKey.data() + i * 4));
+		}
+
+		Code.push_back(0xC3);
+
+		auto Found = Scan(Code);
+		Check(Found.size() == 1 && Found[0].Key == MainKey && Found[0].bReturns, "key stored with mov dword [rcx+n], imm32");
+
+		Code.assign(8, 0xCC);
+
+		for (int i = 0; i < 4; i++)
+		{
+			Code.insert(Code.end(), { 0x48, 0xB8 });
+			Append(Code, *reinterpret_cast<const uint64_t*>(MainKey.data() + i * 8));
+
+			if (i == 0)
+				Code.insert(Code.end(), { 0x48, 0x89, 0x07 });
+			else
+				Code.insert(Code.end(), { 0x48, 0x89, 0x47, static_cast<uint8_t>(i * 8) });
+		}
+
+		Code.push_back(0xC3);
+		Check(Contains(Scan(Code), MainKey), "key stored with movabs rax, imm64 / mov [rdi+n], rax");
+
+		Code.assign(4, 0xCC);
+		auto Load = [&](std::initializer_list<uint8_t> Prefix, size_t ConstantOffset)
+			{
+				Code.insert(Code.end(), Prefix);
+				auto End = Code.size() + 4;
+				Append<int32_t>(Code, static_cast<int32_t>(ConstantOffset - End));
+			};
+
+		Load({ 0x0F, 0x28, 0x05 }, 64);
+		Code.insert(Code.end(), { 0x0F, 0x11, 0x07 });
+		Load({ 0x66, 0x0F, 0x6F, 0x0D }, 80);
+		Code.insert(Code.end(), { 0xF3, 0x0F, 0x7F, 0x4F, 0x10 });
+		Code.push_back(0xC3);
+		Code.resize(64, 0xCC);
+		Code.insert(Code.end(), MainKey.begin(), MainKey.end());
+		Check(Contains(Scan(Code), MainKey), "key loaded from constants with movaps/movdqa and stored with movups/movdqu");
+
+		Code.assign(4, 0xCC);
+		Load({ 0xC5, 0xFC, 0x10, 0x05 }, 64);
+		Code.insert(Code.end(), { 0xC5, 0xFC, 0x11, 0x01, 0xC5, 0xF8, 0x77, 0xC3 });
+		Code.resize(64, 0xCC);
+		Code.insert(Code.end(), MainKey.begin(), MainKey.end());
+		Check(Contains(Scan(Code), MainKey), "key copied with vmovups ymm");
+
+		Code.assign(4, 0xCC);
+		Code.insert(Code.end(), { 0x55, 0x48, 0x89, 0xE5 });
+
+		for (int i = 0; i < 32; i++)
+			Code.insert(Code.end(), { 0xC6, 0x45, static_cast<uint8_t>(0xC0 + i), MainKey[i] });
+
+		Code.insert(Code.end(), { 0xC7, 0x45, 0xBC, 0, 0, 0, 0 });
+		Check(Contains(Scan(Code), MainKey), "key stored byte by byte next to a zeroed loop counter");
+
+		constexpr uint32_t Sha256[8] = { 0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19 };
+		Code.assign(4, 0xCC);
+
+		for (int i = 0; i < 8; i++)
+		{
+			Code.insert(Code.end(), { 0xC7, 0x41, static_cast<uint8_t>(8 + i * 4) });
+			Append(Code, Sha256[i]);
+		}
+
+		Code.push_back(0xC3);
+		Check(Scan(Code).empty(), "SHA-256 initial values aren't reported as a key");
+
+		Code.assign(4, 0xCC);
+
+		for (int i = 0; i < 12; i++)
+		{
+			Code.insert(Code.end(), { 0xC7, 0x41, static_cast<uint8_t>(i * 4) });
+			Append(Code, *reinterpret_cast<const uint32_t*>(MainKey.data() + (i % 8) * 4) ^ static_cast<uint32_t>(i * 0x01010101));
+		}
+
+		Code.push_back(0xC3);
+		Check(Scan(Code).empty(), "48 byte constants aren't reported as a key");
+	}
+
+	std::filesystem::path MakePaks(const std::filesystem::path& Directory)
+	{
+		std::error_code Error;
+		std::filesystem::remove_all(Directory, Error);
+		std::filesystem::create_directories(Directory / "Sub", Error);
+
+		AesKey::FGuid Zero{};
+
+		Check(WriteBytes(Directory / "pakchunk0-Windows.pak", MakePak(&MainKey, Zero)), "writing an encrypted pak");
+		Check(WriteBytes(Directory / "pakchunk1-Windows.pak", MakePak(nullptr, Zero)), "writing an unencrypted pak");
+		Check(WriteBytes(Directory / "pakchunk2-Windows.utoc", MakeToc(DynamicKey, DynamicGuid, false)), "writing an encrypted utoc");
+		Check(WriteBytes(Directory / "Sub" / "pakchunk3-Windows.utoc", MakeToc(MainKey, Zero, true)), "writing a signed encrypted utoc");
+
+		return Directory;
+	}
+
+	void CheckContainers(const std::filesystem::path& Directory)
+	{
+		auto Containers = AesKey::ReadContainers(Directory);
+		Check(Containers.size() == 4, std::format("4 pak and utoc files were read (got {})", Containers.size()));
+
+		if (Containers.size() != 4)
+			return;
+
+		auto Get = [&](const char* Name) -> const AesKey::FContainer&
+			{
+				for (auto& Container : Containers)
+				{
+					if (Container.Path.filename() == Name)
+						return Container;
+				}
+
+				return Containers[0];
+			};
+
+		auto& Pak = Get("pakchunk0-Windows.pak");
+		auto& Plain = Get("pakchunk1-Windows.pak");
+		auto& Toc = Get("pakchunk2-Windows.utoc");
+		auto& Signed = Get("pakchunk3-Windows.utoc");
+
+		Check(Pak.bEncrypted && Pak.bHasBlock && AesKey::IsZeroGuid(Pak.Guid), "encrypted pak index detected");
+		Check(!Plain.bEncrypted && !Plain.bHasBlock, "unencrypted pak detected");
+		Check(Toc.bIoStore && Toc.bEncrypted && Toc.bHasBlock && Toc.Guid == DynamicGuid, "encrypted utoc directory index and its key guid detected");
+		Check(Signed.bIoStore && Signed.bHasBlock, "signed utoc directory index found");
+
+		Check(AesKey::Decrypts(MainKey, Pak) && !AesKey::Decrypts(DynamicKey, Pak), "the pak index decrypts only with its key");
+		Check(AesKey::Decrypts(DynamicKey, Toc) && !AesKey::Decrypts(MainKey, Toc), "the utoc directory index decrypts only with its key");
+		Check(AesKey::Decrypts(MainKey, Signed), "the signed utoc directory index decrypts");
+	}
+
+	void CheckResult(const AesKey::FResult& Result)
+	{
+		const AesKey::FFoundKey* Main = nullptr;
+		const AesKey::FFoundKey* Dynamic = nullptr;
+
+		for (auto& Key : Result.Keys)
+		{
+			if (Key.bVerified && AesKey::IsZeroGuid(Key.Guid))
+				Main = &Key;
+
+			if (Key.bVerified && Key.Guid == DynamicGuid)
+				Dynamic = &Key;
+		}
+
+		Check(Main && Main->Key == MainKey, "main AES key found and verified");
+		Check(Main && Main->Source == "code", std::format("main AES key found in the code (found in {})", Main ? Main->Source : "nothing"));
+		Check(Main && Main->Containers == 2, "main AES key decrypts the pak and the signed utoc");
+		Check(Dynamic && Dynamic->Key == DynamicKey, "dynamic AES key found and verified");
+		Check(Dynamic && Dynamic->Source == "memory", std::format("dynamic AES key found in memory (found in {})", Dynamic ? Dynamic->Source : "nothing"));
+	}
+
+	void RegisterKeys()
+	{
+		KeyRegistry = new uint8_t[64];
+		memcpy(KeyRegistry, DynamicGuid.data(), 16);
+
+		for (int i = 0; i < 32; i++)
+			KeyRegistry[16 + i] = DynamicKey[i] ^ KeySalt;
+	}
+
+	int Host()
+	{
+		RegisterKeys();
+
+		auto Executable = GetExecutableDirectory();
+		auto Directory = MakePaks(Executable.parent_path().parent_path() / "Content" / "Paks");
+		auto LogPath = Executable / "UnrealMappingsDumper.log";
+
+		std::error_code Error;
+		std::filesystem::remove(LogPath, Error);
+
+		printf("Fake game with encrypted paks in %s\n", Memory::PathToUtf8(Directory).c_str());
+		fflush(stdout);
+
+		std::string Log;
+
+		for (int i = 0; i < 600 && Log.find("Searched for") == std::string::npos; i++)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+			std::ifstream File(LogPath, std::ios::binary);
+			Log.assign(std::istreambuf_iterator<char>(File), std::istreambuf_iterator<char>());
+		}
+
+		Check(Log.find("Searched for") != std::string::npos, "the AES key search finished within 120 seconds");
+		Check(Log.find("AES key: " + Aes::ToHex(MainKey)) != std::string::npos, "the dumper found the main AES key");
+		Check(Log.find("Dynamic AES key " + AesKey::GuidToString(DynamicGuid) + ": " + Aes::ToHex(DynamicKey)) != std::string::npos, "the dumper found the dynamic AES key");
+
+		fprintf(stderr, "aes (external): %d failure(s)\n", Failures);
+		return Failures ? 1 : 0;
+	}
+
+	int Run()
+	{
+		RegisterKeys();
+
+		unsigned char Registered[32];
+		KeyCallback(Registered);
+		Check(memcmp(Registered, MainKey.data(), 32) == 0, "the fake key registration callback works");
+
+		CheckCipher();
+		CheckScanner();
+
+		auto Directory = MakePaks(GetExecutableDirectory() / "AesTest" / "Content" / "Paks");
+		CheckContainers(Directory);
+
+#ifdef _WIN32
+		int Pid = static_cast<int>(GetCurrentProcessId());
+		Memory::SetBackend(std::make_unique<FLocalBackend>());
+#else
+		int Pipe[2];
+
+		if (pipe(Pipe) != 0)
+			return 1;
+
+		fflush(stdout);
+		fflush(stderr);
+
+		auto Child = fork();
+
+		if (Child == 0)
+		{
+			char Ready = 1;
+			(void)!write(Pipe[1], &Ready, 1);
+
+			for (;;)
+				pause();
+		}
+
+		char Ready = 0;
+		(void)!read(Pipe[0], &Ready, 1);
+
+		int Pid = Child;
+
+		auto Target = Process::Get(Pid);
+		std::string Error;
+		auto Backend = Target ? FRemoteBackend::Open(*Target, Error) : nullptr;
+		Check(Backend != nullptr, "opening the fake game process " + Error);
+
+		if (Backend)
+			Memory::SetBackend(std::move(Backend));
+#endif
+
+		if (Memory::HasBackend())
+		{
+			Log::OpenFile(GetExecutableDirectory() / "UnrealMappingsDumper.Tests.aes.log");
+			CheckResult(AesKey::Find(Directory));
+			Log::CloseFile();
+
+			auto ExitCode = Cli::Run({ "--pid", std::to_string(Pid), "--aes", "--paks", Memory::PathToUtf8(Directory) });
+			Check(ExitCode == 0, std::format("unreal-mappings-dumper --aes exits with 0 (got {})", ExitCode));
+		}
+
+#ifndef _WIN32
+		kill(Child, SIGKILL);
+		waitpid(Child, nullptr, 0);
+#endif
+
+		fprintf(stderr, "aes: %d failure(s)\n", Failures);
+		return Failures ? 1 : 0;
+	}
+}
+
 int main(int argc, char** argv)
 {
 	std::vector<std::string> Args(argv + 1, argv + argc);
+
+	if (!Args.empty() && Args[0] == "aes")
+		return AesTest::Run();
+
+	if (!Args.empty() && Args[0] == "host-aes")
+		return AesTest::Host();
 
 	bool bHost = !Args.empty() && Args[0] == "host";
 

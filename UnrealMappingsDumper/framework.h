@@ -29,4 +29,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <thread>
+#include <atomic>
+#include <cmath>
 #include "../Dependencies/parallel_hashmap/phmap.h"

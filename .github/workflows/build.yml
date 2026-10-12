@@ -31,6 +31,36 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+      - name: External dump test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path e2e-external | Out-Null
+          Copy-Item build/Release/UnrealMappingsDumper.Tests.exe e2e-external/FakeGame-Win64-Shipping.exe
+          $game = Start-Process -FilePath e2e-external/FakeGame-Win64-Shipping.exe -ArgumentList "host", "optimized" -PassThru -RedirectStandardError e2e-external/host.err -RedirectStandardOutput e2e-external/host.out
+          $null = $game.Handle
+          Start-Sleep -Seconds 3
+          $dumper = Start-Process -FilePath build/Release/UnrealMappingsDumper.exe -ArgumentList "--cli", "FakeGame" -Wait -PassThru -NoNewWindow -RedirectStandardOutput e2e-external/dumper.out -RedirectStandardError e2e-external/dumper.err
+          Get-Content e2e-external/dumper.out, e2e-external/dumper.err
+          if ($dumper.ExitCode -ne 0) { exit $dumper.ExitCode }
+          $game.WaitForExit()
+          Get-Content e2e-external/host.err
+          exit $game.ExitCode
+
+      - name: AES key test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path e2e-aes/FakeGame/Binaries/Win64 | Out-Null
+          Copy-Item build/Release/UnrealMappingsDumper.Tests.exe e2e-aes/FakeGame/Binaries/Win64/FakeGame-Win64-Shipping.exe
+          $game = Start-Process -FilePath e2e-aes/FakeGame/Binaries/Win64/FakeGame-Win64-Shipping.exe -ArgumentList "host-aes" -PassThru -RedirectStandardError e2e-aes/host.err -RedirectStandardOutput e2e-aes/host.out
+          $null = $game.Handle
+          Start-Sleep -Seconds 3
+          $dumper = Start-Process -FilePath build/Release/UnrealMappingsDumper.exe -ArgumentList "--cli", "--aes", "FakeGame" -Wait -PassThru -NoNewWindow -RedirectStandardOutput e2e-aes/dumper.out -RedirectStandardError e2e-aes/dumper.err
+          Get-Content e2e-aes/dumper.out, e2e-aes/dumper.err
+          if ($dumper.ExitCode -ne 0) { exit $dumper.ExitCode }
+          $game.WaitForExit()
+          Get-Content e2e-aes/host.err
+          exit $game.ExitCode
+
       - name: Injection test
         shell: pwsh
         run: |
@@ -49,8 +79,9 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path package | Out-Null
-          Copy-Item build/Release/UnrealMappingsDumper.dll, build/Release/UnrealMappingsInjector.exe, scripts/inject-linux.sh, README.md, LICENSE package/
+          New-Item -ItemType Directory -Force -Path package/injection | Out-Null
+          Copy-Item build/Release/UnrealMappingsDumper.exe, README.md, LICENSE package/
+          Copy-Item build/Release/UnrealMappingsDumper.dll, build/Release/UnrealMappingsInjector.exe package/injection/
 
       - uses: actions/upload-artifact@v4
         with:
@@ -68,7 +99,7 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ g++-mingw-w64-x86-64-posix wine64
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ g++-mingw-w64-x86-64-posix wine64 libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev
 
       - name: Build native
         run: |
@@ -99,6 +130,19 @@ jobs:
           cat e2e/native/host.log
           exit $status
 
+      - name: Find the AES key of a native game
+        run: |
+          mkdir -p e2e/aes-native/FakeGame/Binaries/Linux
+          cp build-linux/UnrealMappingsDumper.Tests e2e/aes-native/FakeGame/Binaries/Linux/FakeGame-Linux-Shipping
+          (cd e2e/aes-native && FakeGame/Binaries/Linux/FakeGame-Linux-Shipping host-aes > host.log 2>&1) &
+          GAME=$!
+          sleep 2
+          sudo build-linux/unreal-mappings-dumper --aes FakeGame
+          status=0
+          wait $GAME || status=$?
+          cat e2e/aes-native/host.log
+          exit $status
+
       - name: Dump a Wine game with the native dumper
         run: |
           WINE=$(command -v wine64 || echo /usr/lib/wine/wine64)
@@ -115,13 +159,29 @@ jobs:
           cat e2e/wine/host.log
           exit $status
 
+      - name: Find the AES key of a Wine game
+        run: |
+          WINE=$(command -v wine64 || echo /usr/lib/wine/wine64)
+          mkdir -p e2e/aes-wine/FakeGame/Binaries/Win64
+          cp build-mingw/UnrealMappingsDumper.Tests.exe e2e/aes-wine/FakeGame/Binaries/Win64/FakeGame-Win64-Shipping.exe
+          (cd e2e/aes-wine && "$WINE" FakeGame/Binaries/Win64/FakeGame-Win64-Shipping.exe host-aes > host.log 2>&1) &
+          GAME=$!
+          for attempt in $(seq 1 30); do
+            if sudo build-linux/unreal-mappings-dumper --aes FakeGame; then break; fi
+            sleep 2
+          done
+          status=0
+          wait $GAME || status=$?
+          cat e2e/aes-wine/host.log
+          exit $status
+
       - name: Inject into a Wine game
         run: |
           WINE=$(command -v wine64 || echo /usr/lib/wine/wine64)
           mkdir -p e2e/inject/game e2e/inject/tool
           cp build-mingw/UnrealMappingsDumper.Tests.exe e2e/inject/game/FakeGame-Win64-Shipping.exe
           cp build-mingw/UnrealMappingsDumper.dll build-mingw/UnrealMappingsInjector.exe scripts/inject-linux.sh e2e/inject/tool/
-          (cd e2e/inject/game && "$WINE" FakeGame-Win64-Shipping.exe host newfield > host.log 2>&1) &
+          (cd e2e/inject/game && "$WINE" start /wait /unix "$PWD/FakeGame-Win64-Shipping.exe" host newfield > host.log 2>&1) &
           GAME=$!
           for attempt in $(seq 1 30); do
             if e2e/inject/tool/inject-linux.sh FakeGame; then break; fi
@@ -131,6 +191,21 @@ jobs:
           wait $GAME || status=$?
           cat e2e/inject/game/host.log
           cat e2e/inject/game/UnrealMappingsDumper.log || true
+          exit $status
+
+      - name: Dump a Wine game with the Windows dumper
+        run: |
+          WINE=$(command -v wine64 || echo /usr/lib/wine/wine64)
+          mkdir -p e2e/wine-external
+          cp build-mingw/UnrealMappingsDumper.Tests.exe e2e/wine-external/FakeGame-Win64-Shipping.exe
+          (cd e2e/wine-external && "$WINE" start /wait /unix "$PWD/FakeGame-Win64-Shipping.exe" host classic > host.log 2>&1) &
+          GAME=$!
+          for attempt in $(seq 1 30); do
+            if "$WINE" build-mingw/UnrealMappingsDumper.exe --cli FakeGame; then break; fi
+            sleep 2
+          done
+          status=0
+          wait $GAME || status=$?
           exit $status
 
       - uses: actions/upload-artifact@v4
@@ -146,10 +221,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: UnrealMappingsDumper
-          path: UnrealMappingsDumper
+          path: windows-package
 
       - uses: actions/download-artifact@v4
         with:
@@ -158,9 +235,12 @@ jobs:
 
       - name: Package
         run: |
-          chmod +x UnrealMappingsDumper/inject-linux.sh linux/unreal-mappings-dumper
-          zip -r UnrealMappingsDumper-${{ github.ref_name }}-windows.zip UnrealMappingsDumper
-          tar -czf UnrealMappingsDumper-${{ github.ref_name }}-linux-x86_64.tar.gz -C linux unreal-mappings-dumper -C ../UnrealMappingsDumper README.md LICENSE UnrealMappingsDumper.dll UnrealMappingsInjector.exe inject-linux.sh
+          mkdir -p linux-package/proton-injection
+          cp linux/unreal-mappings-dumper README.md LICENSE linux-package/
+          cp windows-package/injection/UnrealMappingsDumper.dll windows-package/injection/UnrealMappingsInjector.exe scripts/inject-linux.sh linux-package/proton-injection/
+          chmod +x linux-package/unreal-mappings-dumper linux-package/proton-injection/inject-linux.sh
+          (cd windows-package && zip -r ../UnrealMappingsDumper-${{ github.ref_name }}-windows.zip .)
+          tar -czf UnrealMappingsDumper-${{ github.ref_name }}-linux-x86_64.tar.gz -C linux-package .
 
       - uses: softprops/action-gh-release@v2
         with:

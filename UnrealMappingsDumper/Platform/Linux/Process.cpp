@@ -1,6 +1,9 @@
 #include "../../pch.h"
 
 #include "Process.h"
+#include "RemoteBackend.h"
+
+#include <unistd.h>
 
 namespace
 {
@@ -15,34 +18,6 @@ namespace
 		auto Slash = Path.find_last_of("/\\");
 		return Slash == std::string::npos ? Path : Path.substr(Slash + 1);
 	}
-
-	bool IsUnrealName(const std::string& LowerName)
-	{
-		for (auto Marker : { "-win64-", "-wingdk-" })
-		{
-			if (LowerName.find(Marker) != std::string::npos && LowerName.ends_with(".exe"))
-				return true;
-		}
-
-		for (auto Platform : { "-linux-", "-linuxarm64-" })
-		{
-			for (auto Configuration : { "shipping", "test", "development", "debuggame", "debug" })
-			{
-				if (LowerName.ends_with(std::string(Platform) + Configuration))
-					return true;
-			}
-		}
-
-		return false;
-	}
-}
-
-std::string Process::ToLower(std::string Str)
-{
-	for (auto& C : Str)
-		C = static_cast<char>(tolower(static_cast<unsigned char>(C)));
-
-	return Str;
 }
 
 std::optional<Process::FInfo> Process::Get(int Pid)
@@ -71,6 +46,15 @@ std::optional<Process::FInfo> Process::Get(int Pid)
 
 		if (!ToLower(Info.Name).ends_with(".exe"))
 			return std::nullopt;
+
+		for (auto& Map : ReadMaps(Pid))
+		{
+			if (Map.Offset == 0 && !Map.Path.empty() && ToLower(BaseName(Map.Path)) == ToLower(Info.Name))
+			{
+				Info.Executable = Map.Path;
+				break;
+			}
+		}
 	}
 	else
 	{
@@ -98,26 +82,6 @@ std::vector<Process::FInfo> Process::List()
 	}
 
 	std::sort(Ret.begin(), Ret.end(), [](const FInfo& A, const FInfo& B) { return A.Pid < B.Pid; });
-	return Ret;
-}
-
-std::vector<Process::FInfo> Process::Find(const std::string& Pattern)
-{
-	std::vector<FInfo> Ret;
-	auto LowerPattern = ToLower(Pattern);
-
-	for (auto& Info : List())
-	{
-		auto LowerName = ToLower(Info.Name);
-
-		bool bMatches = LowerPattern.empty()
-			? IsUnrealName(LowerName)
-			: LowerName.find(LowerPattern) != std::string::npos;
-
-		if (bMatches)
-			Ret.push_back(Info);
-	}
-
 	return Ret;
 }
 
@@ -149,4 +113,15 @@ std::vector<Process::FMapping> Process::ReadMaps(int Pid)
 	}
 
 	return Ret;
+}
+
+std::unique_ptr<Memory::IBackend> Process::OpenBackend(const FInfo& Target, std::string& OutError, EOpenError* OutCode)
+{
+	return FRemoteBackend::Open(Target, OutError, OutCode);
+}
+
+std::filesystem::path Process::GetSelfPath()
+{
+	std::error_code Error;
+	return std::filesystem::read_symlink("/proc/self/exe", Error);
 }
